@@ -305,35 +305,57 @@ async function startScanning() {
     document.getElementById('progressBarFill').style.width = '0%';
     document.getElementById('progressStatusText').textContent = 'Scanning: Discovery Phase...';
 
-    const cleanSubnets = new Set();
-    const allSubnets = [];
-    ranges.forEach(r => {
-        getSubnets24(r).forEach(sub => allSubnets.push(sub));
-    });
+    // Allocate budgets dynamically across selected ranges
+    const rangeBudgets = new Array(ranges.length).fill(Math.floor(sampleSize / ranges.length));
+    let remainder = sampleSize % ranges.length;
+    for (let i = 0; i < remainder; i++) {
+        rangeBudgets[i]++;
+    }
+
+    // Generate unique random candidates directly from CIDRs
+    const candidates = [];
+    const uniqueKeys = new Set();
     
-    if (allSubnets.length === 0) {
-        showWarning("No subnets could be parsed.");
+    for (let i = 0; i < ranges.length; i++) {
+        const range = ranges[i];
+        const budget = rangeBudgets[i];
+        let attempts = 0;
+        const maxAttempts = budget * 20; // Allow enough attempts to find unique IPs
+        let generatedForRange = 0;
+        
+        while (generatedForRange < budget && attempts < maxAttempts) {
+            attempts++;
+            const ip = sampleIpFromCidr(range);
+            if (ip) {
+                const port = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
+                const key = `${ip}:${port}`;
+                if (!uniqueKeys.has(key)) {
+                    uniqueKeys.add(key);
+                    candidates.push({ ip, port, range });
+                    generatedForRange++;
+                }
+            }
+        }
+    }
+
+    if (candidates.length === 0) {
+        showWarning("No candidates could be generated. Please check your ranges.");
         finalizeScan();
         return;
     }
-    
-    shuffleArray(allSubnets);
-    
-    // Scouting count: ~25% of sample size, bounded between 5 and 50
-    const scoutCount = Math.max(5, Math.min(50, allSubnets.length, Math.floor(sampleSize / 4)));
-    const scoutSubnets = allSubnets.slice(0, scoutCount);
-    
-    const scoutCandidates = [];
-    scoutSubnets.forEach(sub => {
-        const ip = sampleIpFromCidr(sub);
-        if (ip) {
-            const port = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
-            scoutCandidates.push({ ip, port, range: sub });
-        }
-    });
-    
+
+    // Shuffle candidates so requests to different ranges are interleaved
+    shuffleArray(candidates);
+
+    const actualSampleSize = candidates.length;
+    document.getElementById('statTotal').textContent = actualSampleSize;
+    document.getElementById('progressStatusText').textContent = 'Scanning: Testing candidates...';
+
     if (logDiv) {
-        logDiv.innerHTML += `<div>[System] Phase 1: Scouting ${scoutCandidates.length} random /24 subnets...</div>`;
+        logDiv.innerHTML += `<div>[System] Starting scan with ${actualSampleSize} candidates across ${ranges.length} ranges...</div>`;
+        ranges.forEach((r, idx) => {
+            logDiv.innerHTML += `<div style="font-size: 0.7rem; color: var(--text-muted);"> - ${r}: ${rangeBudgets[idx]} candidates</div>`;
+        });
         logDiv.scrollTop = logDiv.scrollHeight;
     }
 
@@ -383,18 +405,16 @@ async function startScanning() {
                     scanResults.sort((a, b) => a.latency - b.latency);
                     renderResultsTable();
                     
-                    cleanSubnets.add(current.range);
-                    
                     if (logDiv) {
                         const pingsStr = latencies.join('ms, ') + 'ms';
-                        logDiv.innerHTML += `<div style="color: var(--success);">[✓] Responsive: ${current.ip}:${current.port} (Avg: ${avgLatency}ms, Pings: [${pingsStr}]) [Subnet: ${current.range}]</div>`;
+                        logDiv.innerHTML += `<div style="color: var(--success);">[✓] Responsive: ${current.ip}:${current.port} (Avg: ${avgLatency}ms, Pings: [${pingsStr}]) [Range: ${current.range}]</div>`;
                         logDiv.scrollTop = logDiv.scrollHeight;
                     }
                 } else {
                     if (logDiv) {
                         if (filteredReason === 'fake') {
                             const badLat = latencies[latencies.length - 1];
-                            logDiv.innerHTML += `<div style="color: var(--text-muted); opacity: 0.7;">[x] Filtered: ${current.ip}:${current.port} (${badLat}ms) - potential fake reset [Subnet: ${current.range}]</div>`;
+                            logDiv.innerHTML += `<div style="color: var(--text-muted); opacity: 0.7;">[x] Filtered: ${current.ip}:${current.port} (${badLat}ms) - potential fake reset [Range: ${current.range}]</div>`;
                         } else {
                             // Offline/Timeout, skip logging to avoid cluttering
                         }
@@ -404,7 +424,7 @@ async function startScanning() {
                 
                 document.getElementById('statScanned').textContent = scannedCount;
                 document.getElementById('statHealthy').textContent = healthyCount;
-                const percent = Math.round((scannedCount / sampleSize) * 100);
+                const percent = Math.round((scannedCount / actualSampleSize) * 100);
                 document.getElementById('progressBarFill').style.width = `${Math.min(100, percent)}%`;
             } catch (e) {
                 console.error(e);
@@ -427,84 +447,8 @@ async function startScanning() {
         await Promise.all(workers);
     }
 
-    // Execute Scouting Phase (1 ping per candidate)
-    await executePhase(scoutCandidates, 1);
-    
-    if (!scanActive) {
-        finalizeScan();
-        return;
-    }
-    
-    // Generate Focus Candidates
-    let focusCandidates = [];
-    const remainingBudget = sampleSize - scoutCandidates.length;
-    
-    if (cleanSubnets.size > 0 && remainingBudget > 0) {
-        const cleanSubnetsList = Array.from(cleanSubnets);
-        if (logDiv) {
-            logDiv.innerHTML += `<div style="color: var(--success);">[System] Phase 1 Complete. Discovered ${cleanSubnets.size} active /24 subnets. Starting Focused Phase...</div>`;
-            logDiv.scrollTop = logDiv.scrollHeight;
-        }
-        document.getElementById('progressStatusText').textContent = 'Scanning: Focused Phase...';
-        
-        let focusIndex = 0;
-        const candidateKeys = new Set(scoutCandidates.map(c => `${c.ip}:${c.port}`));
-        let attempts = 0;
-        const maxAttempts = remainingBudget * 10;
-        
-        while (focusCandidates.length < remainingBudget && attempts < maxAttempts) {
-            attempts++;
-            const sub = cleanSubnetsList[focusIndex];
-            const ip = sampleIpFromCidr(sub);
-            if (ip) {
-                const port = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
-                const key = `${ip}:${port}`;
-                if (!candidateKeys.has(key)) {
-                    candidateKeys.add(key);
-                    focusCandidates.push({ ip, port, range: sub });
-                }
-            }
-            focusIndex = (focusIndex + 1) % cleanSubnetsList.length;
-        }
-    } else if (remainingBudget > 0) {
-        if (logDiv) {
-            logDiv.innerHTML += `<div style="color: var(--warning);">[System] Phase 1 Complete. No active subnets discovered. Falling back to random scanning...</div>`;
-            logDiv.scrollTop = logDiv.scrollHeight;
-        }
-        document.getElementById('progressStatusText').textContent = 'Scanning: Random Fallback Phase...';
-        
-        const fallbackSubnets = allSubnets.slice(scoutCount);
-        if (fallbackSubnets.length > 0) {
-            let fallbackIndex = 0;
-            const candidateKeys = new Set(scoutCandidates.map(c => `${c.ip}:${c.port}`));
-            let attempts = 0;
-            const maxAttempts = remainingBudget * 10;
-            
-            while (focusCandidates.length < remainingBudget && attempts < maxAttempts) {
-                attempts++;
-                const sub = fallbackSubnets[fallbackIndex];
-                const ip = sampleIpFromCidr(sub);
-                if (ip) {
-                    const port = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
-                    const key = `${ip}:${port}`;
-                    if (!candidateKeys.has(key)) {
-                        candidateKeys.add(key);
-                        focusCandidates.push({ ip, port, range: sub });
-                    }
-                }
-                fallbackIndex = (fallbackIndex + 1) % fallbackSubnets.length;
-            }
-        }
-    }
-    
-    if (focusCandidates.length > 0 && scanActive) {
-        if (logDiv) {
-            logDiv.innerHTML += `<div>[System] Phase 2: Testing ${focusCandidates.length} candidates in active subnets (Stability count: ${testCount})...</div>`;
-            logDiv.scrollTop = logDiv.scrollHeight;
-        }
-        
-        await executePhase(focusCandidates, testCount);
-    }
+    // Run the unified scan with the user-defined testCount
+    await executePhase(candidates, testCount);
     
     finalizeScan();
 

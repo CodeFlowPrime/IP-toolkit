@@ -109,12 +109,30 @@ function shuffleArray(array) {
 function onScanProviderChange() {
     const provider = document.getElementById('scanProvider').value;
     const customCidrGroup = document.getElementById('customCidrGroup');
-    if (!customCidrGroup) return;
+    const rangeSelectorGroup = document.getElementById('rangeSelectorGroup');
+    const container = document.getElementById('providerRangesContainer');
+    if (!customCidrGroup || !rangeSelectorGroup || !container) return;
     
     if (provider === 'custom') {
         customCidrGroup.style.display = 'block';
+        rangeSelectorGroup.style.display = 'none';
     } else {
         customCidrGroup.style.display = 'none';
+        rangeSelectorGroup.style.display = 'block';
+        
+        // Populate ranges checkboxes
+        const ranges = IP_RANGES_DATABASE[provider] || [];
+        let html = '';
+        ranges.forEach((range, idx) => {
+            const id = `range_${provider}_${idx}`;
+            html += `
+                <div style="display: inline-block;">
+                    <input type="checkbox" id="${id}" class="pill-checkbox" value="${range}" checked>
+                    <label for="${id}" class="pill-label" style="font-family: monospace; font-size: 0.8rem; padding: 0.4rem 0.8rem; border-radius: 15px;">${range}</label>
+                </div>
+            `;
+        });
+        container.innerHTML = html;
     }
 
     // Auto-adjust min latency filter based on provider
@@ -126,6 +144,13 @@ function onScanProviderChange() {
             minLatencySelect.value = "20"; // Reset to default 20ms for foreign CDNs
         }
     }
+}
+
+function selectAllRanges(status) {
+    const checkboxes = document.querySelectorAll('#providerRangesContainer input[type="checkbox"]');
+    checkboxes.forEach(cb => {
+        cb.checked = status;
+    });
 }
 
 function updateScanSampleCount() {
@@ -206,11 +231,16 @@ async function startScanning() {
         }
         ranges = customText.split('\n').filter(r => r.trim() !== '');
     } else {
-        ranges = IP_RANGES_DATABASE[provider] || [];
+        const checkboxes = document.querySelectorAll('#providerRangesContainer input[type="checkbox"]');
+        checkboxes.forEach(cb => {
+            if (cb.checked) {
+                ranges.push(cb.value);
+            }
+        });
     }
     
     if (ranges.length === 0) {
-        showWarning("No valid ranges found to scan.");
+        showWarning("Please select or enter at least one IP range to scan.");
         return;
     }
     
@@ -271,31 +301,61 @@ async function startScanning() {
     let scannedCount = 0;
     let healthyCount = 0;
     
+    const testCount = parseInt(document.getElementById('scanTestCount')?.value) || 1;
+    
     async function runWorker() {
         while (index < candidates.length && scanActive) {
             const current = candidates[index++];
             if (!current) break;
             
             try {
-                const latency = await testIpConnection(current.ip, current.port, timeout);
+                let latencies = [];
+                let isHealthy = true;
+                let filteredReason = ''; // 'fake' or 'timeout'
+                
+                for (let t = 0; t < testCount; t++) {
+                    if (!scanActive) {
+                        isHealthy = false;
+                        break;
+                    }
+                    
+                    const latency = await testIpConnection(current.ip, current.port, timeout);
+                    if (latency === null) {
+                        isHealthy = false;
+                        filteredReason = 'timeout';
+                        break;
+                    }
+                    if (latency < minLatency) {
+                        isHealthy = false;
+                        filteredReason = 'fake';
+                        latencies.push(latency); // keep track for logging
+                        break;
+                    }
+                    latencies.push(latency);
+                }
+                
                 scannedCount++;
                 
-                if (latency !== null) {
-                    if (latency >= minLatency) {
-                        healthyCount++;
-                        scanResults.push({ ip: current.ip, port: current.port, latency });
-                        scanResults.sort((a, b) => a.latency - b.latency);
-                        renderResultsTable();
-                        if (logDiv) {
-                            logDiv.innerHTML += `<div style="color: var(--success);">[✓] Responsive: ${current.ip}:${current.port} (${latency}ms) [Range: ${current.range}]</div>`;
-                            logDiv.scrollTop = logDiv.scrollHeight;
+                if (isHealthy && latencies.length === testCount) {
+                    const avgLatency = Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length);
+                    healthyCount++;
+                    scanResults.push({ ip: current.ip, port: current.port, latency: avgLatency });
+                    scanResults.sort((a, b) => a.latency - b.latency);
+                    renderResultsTable();
+                    if (logDiv) {
+                        const pingsStr = latencies.join('ms, ') + 'ms';
+                        logDiv.innerHTML += `<div style="color: var(--success);">[✓] Responsive: ${current.ip}:${current.port} (Avg: ${avgLatency}ms, Pings: [${pingsStr}]) [Range: ${current.range}]</div>`;
+                        logDiv.scrollTop = logDiv.scrollHeight;
+                    }
+                } else {
+                    if (logDiv) {
+                        if (filteredReason === 'fake') {
+                            const badLat = latencies[latencies.length - 1];
+                            logDiv.innerHTML += `<div style="color: var(--text-muted); opacity: 0.7;">[x] Filtered: ${current.ip}:${current.port} (${badLat}ms) - potential fake reset [Range: ${current.range}]</div>`;
+                        } else {
+                            // Offline/Timeout, skip logging to avoid cluttering
                         }
-                    } else {
-                        console.log(`Filtered out IP ${current.ip}:${current.port} with low latency: ${latency}ms (potential fake reset)`);
-                        if (logDiv) {
-                            logDiv.innerHTML += `<div style="color: var(--text-muted); opacity: 0.7;">[x] Filtered: ${current.ip}:${current.port} (${latency}ms) - potential fake reset [Range: ${current.range}]</div>`;
-                            logDiv.scrollTop = logDiv.scrollHeight;
-                        }
+                        logDiv.scrollTop = logDiv.scrollHeight;
                     }
                 }
                 
@@ -996,6 +1056,7 @@ function downloadOutput() {
 }
 
 // Initialize App Core (directly, since DOM is already loaded)
+onScanProviderChange();
 toggleInputFields();
 toggleNamingFields();
 updateOutputCountValue();

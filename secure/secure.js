@@ -174,6 +174,7 @@ async function startScanning() {
     const threadCount = parseInt(document.getElementById('scanThreads').value) || 50;
     const timeout = parseInt(document.getElementById('scanTimeout').value) || 1500;
     const sampleSize = parseInt(document.getElementById('scanSampleSize').value) || 200;
+    const minLatency = parseInt(document.getElementById('scanMinLatency')?.value) || 0;
     
     let ranges = [];
     if (provider === 'custom') {
@@ -206,12 +207,13 @@ async function startScanning() {
     const candidates = [];
     const candidateKeys = new Set();
     let attempts = 0;
-    const maxAttempts = sampleSize * 5;
+    const maxAttempts = sampleSize * 10;
     
+    let rangeIndex = 0;
     while (candidates.length < sampleSize && attempts < maxAttempts) {
         attempts++;
-        const randomCidr = ranges[Math.floor(Math.random() * ranges.length)];
-        const sampledIp = sampleIpFromCidr(randomCidr);
+        const currentCidr = ranges[rangeIndex];
+        const sampledIp = sampleIpFromCidr(currentCidr);
         if (sampledIp) {
             const randomPort = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
             const key = `${sampledIp}:${randomPort}`;
@@ -220,6 +222,7 @@ async function startScanning() {
                 candidates.push({ ip: sampledIp, port: randomPort });
             }
         }
+        rangeIndex = (rangeIndex + 1) % ranges.length;
     }
     
     if (candidates.length === 0) {
@@ -252,10 +255,14 @@ async function startScanning() {
                 scannedCount++;
                 
                 if (latency !== null) {
-                    healthyCount++;
-                    scanResults.push({ ip: current.ip, port: current.port, latency });
-                    scanResults.sort((a, b) => a.latency - b.latency);
-                    renderResultsTable();
+                    if (latency >= minLatency) {
+                        healthyCount++;
+                        scanResults.push({ ip: current.ip, port: current.port, latency });
+                        scanResults.sort((a, b) => a.latency - b.latency);
+                        renderResultsTable();
+                    } else {
+                        console.log(`Filtered out IP ${current.ip}:${current.port} with low latency: ${latency}ms (potential fake reset)`);
+                    }
                 }
                 
                 document.getElementById('statScanned').textContent = scannedCount;

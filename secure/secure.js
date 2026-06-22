@@ -373,7 +373,7 @@ async function startScanning() {
         }
     }
 
-    const totalEstimatedCandidates = scoutCandidates.length + totalFocusBudget;
+    let totalEstimatedCandidates = scoutCandidates.length + totalFocusBudget;
     document.getElementById('statTotal').textContent = totalEstimatedCandidates;
     document.getElementById('progressStatusText').textContent = 'Scanning: Scouting Phase...';
 
@@ -489,47 +489,99 @@ async function startScanning() {
 
     // Generate Focus Candidates
     const focusCandidates = [];
-    
-    for (let i = 0; i < ranges.length; i++) {
-        const range = ranges[i];
-        const budget = focusBudgets[i];
-        if (budget <= 0) continue;
-        
-        const activeSubs = Array.from(activeSubnetsPerRange[range]);
-        const subnets = rangeSubnets[range];
-        if (!subnets || subnets.length === 0) continue;
-        
-        const sourceSubnets = activeSubs.length > 0 ? activeSubs : subnets;
-        // Shuffle source subnets to maximize diversity
-        shuffleArray(sourceSubnets);
+    const activeRanges = ranges.filter(r => activeSubnetsPerRange[r] && activeSubnetsPerRange[r].size > 0);
 
-        let attempts = 0;
-        const maxAttempts = budget * 20;
-        let generated = 0;
+    if (activeRanges.length > 0) {
+        // Distribute remaining budget evenly among active ranges
+        const activeRangeBudgets = new Array(activeRanges.length).fill(Math.floor(totalFocusBudget / activeRanges.length));
+        let remainder = totalFocusBudget % activeRanges.length;
+        for (let i = 0; i < remainder; i++) {
+            activeRangeBudgets[i]++;
+        }
 
-        while (generated < budget && attempts < maxAttempts) {
-            attempts++;
-            const sub = sourceSubnets[generated % sourceSubnets.length];
-            const ip = sampleIpFromCidr(sub);
-            if (ip) {
-                const port = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
-                const key = `${ip}:${port}`;
-                if (!uniqueKeys.has(key)) {
-                    uniqueKeys.add(key);
-                    focusCandidates.push({ ip, port, range, subnet: sub });
-                    generated++;
+        for (let i = 0; i < activeRanges.length; i++) {
+            const range = activeRanges[i];
+            const budget = activeRangeBudgets[i];
+            const activeSubs = Array.from(activeSubnetsPerRange[range]);
+            // Shuffle active subnets to maximize diversity
+            shuffleArray(activeSubs);
+
+            let attempts = 0;
+            const maxAttempts = budget * 20;
+            let generated = 0;
+
+            while (generated < budget && attempts < maxAttempts) {
+                attempts++;
+                const sub = activeSubs[generated % activeSubs.length];
+                const ip = sampleIpFromCidr(sub);
+                if (ip) {
+                    const port = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
+                    const key = `${ip}:${port}`;
+                    if (!uniqueKeys.has(key)) {
+                        uniqueKeys.add(key);
+                        focusCandidates.push({ ip, port, range, subnet: sub });
+                        generated++;
+                    }
+                }
+            }
+        }
+    } else {
+        // Fallback: no active subnets found anywhere!
+        // To prevent long hanging, let's cap the fallback budget to a reasonable small number (e.g. max 200 IPs total)
+        // because if everything is blocked, scanning thousands of IPs is useless.
+        const fallbackBudgetTotal = Math.min(200, totalFocusBudget);
+        if (fallbackBudgetTotal > 0) {
+            if (logDiv) {
+                logDiv.innerHTML += `<div style="color: var(--warning); font-size: 0.75rem;">[System] No active subnets found in Phase 1. Running a limited fallback scan of ${fallbackBudgetTotal} random IPs...</div>`;
+                logDiv.scrollTop = logDiv.scrollHeight;
+            }
+
+            const fallbackRangeBudgets = new Array(ranges.length).fill(Math.floor(fallbackBudgetTotal / ranges.length));
+            let remainder = fallbackBudgetTotal % ranges.length;
+            for (let i = 0; i < remainder; i++) {
+                fallbackRangeBudgets[i]++;
+            }
+
+            for (let i = 0; i < ranges.length; i++) {
+                const range = ranges[i];
+                const budget = fallbackRangeBudgets[i];
+                const subnets = rangeSubnets[range];
+                if (!subnets || subnets.length === 0) continue;
+                
+                shuffleArray(subnets);
+
+                let attempts = 0;
+                const maxAttempts = budget * 20;
+                let generated = 0;
+
+                while (generated < budget && attempts < maxAttempts) {
+                    attempts++;
+                    const sub = subnets[generated % subnets.length];
+                    const ip = sampleIpFromCidr(sub);
+                    if (ip) {
+                        const port = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
+                        const key = `${ip}:${port}`;
+                        if (!uniqueKeys.has(key)) {
+                            uniqueKeys.add(key);
+                            focusCandidates.push({ ip, port, range, subnet: sub });
+                            generated++;
+                        }
+                    }
                 }
             }
         }
     }
 
     if (focusCandidates.length > 0 && scanActive) {
+        totalEstimatedCandidates = scoutCandidates.length + focusCandidates.length;
+        document.getElementById('statTotal').textContent = totalEstimatedCandidates;
         document.getElementById('progressStatusText').textContent = 'Scanning: Focused Phase...';
+        
         if (logDiv) {
             logDiv.innerHTML += `<div>[System] Phase 2: Testing ${focusCandidates.length} candidates in active subnets (Stability count: ${testCount})...</div>`;
             logDiv.scrollTop = logDiv.scrollHeight;
         }
-        
+
         // Execute Focused Phase (testCount pings per candidate)
         await executePhase(focusCandidates, testCount);
     }

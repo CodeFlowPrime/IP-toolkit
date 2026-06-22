@@ -24,8 +24,8 @@ Scan CDN IP addresses directly from your browser without using external tools or
 - **IP Range Checklist:** Dynamically select/deselect specific predefined IP ranges to target scans on preferred ranges.
 - **Port Scanner:** Support for major HTTPS/HTTP ports (443, 8443, 2053, 2083, 2096, 80, 8080).
 - **Anti-Censorship Filters:** Configurable minimum latency thresholds to filter out fake firewall resets (TCP RSTs).
+- **Smart Subnet Probing (Scout & Focus):** Dynamically splits large CIDRs into `/24` subnets, discovers open subnets via fast scout probes, and concentrates the final scan budget on those active subnets for maximum efficiency under heavy censorship.
 - **Multi-Test Stability Scan:** Perform multiple connection checks (1, 2, or 3 times) per IP to ensure zero packet loss and report average latencies.
-- **Even Range Sampling:** Custom round-robin candidate selection ensures IP candidates are sampled equally across all selected ranges.
 - **Live Logging Console:** Watch the real-time breakdown of tested ranges and responses directly in the scanner console.
 - **High Performance:** Multi-threaded architecture ($O(1)$ lookup matching) capable of generating and scanning up to **50,000** IP candidates instantly.
 - **Live Metrics:** Real-time progress bar, latency display, and sortable results.

@@ -237,6 +237,23 @@
                     </div>
                 </div>
 
+                <!-- Naming Options Grid -->
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="configNameStyle">Config Naming Style</label>
+                        <select id="configNameStyle" onchange="toggleNamingFields()">
+                            <option value="keep">Keep Original Name</option>
+                            <option value="fixed">Fixed Custom Name</option>
+                            <option value="numeric">Numeric Increment (Prefix_1, Prefix_2...)</option>
+                            <option value="random">Random Suffix (Prefix_abc12...)</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="configPrefixGroup" style="display: none;">
+                        <label for="configNamePrefix">Custom Name / Prefix</label>
+                        <input type="text" id="configNamePrefix" value="CF_Clean" placeholder="e.g. CF_Clean">
+                    </div>
+                </div>
+
                 <!-- Option A: CIDR -->
                 <div id="cidrFields" class="form-group">
                     <label for="ipRange">IP Ranges (CIDR)</label>

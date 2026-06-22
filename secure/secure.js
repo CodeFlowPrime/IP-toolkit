@@ -521,6 +521,18 @@ function toggleInputFields() {
     }
 }
 
+function toggleNamingFields() {
+    const style = document.getElementById('configNameStyle').value;
+    const prefixGroup = document.getElementById('configPrefixGroup');
+    if (!prefixGroup) return;
+
+    if (style === 'keep') {
+        prefixGroup.style.display = 'none';
+    } else {
+        prefixGroup.style.display = 'block';
+    }
+}
+
 function updateOutputCountValue() {
     const slider = document.getElementById('outputCount');
     const display = document.getElementById('outputCountValue');
@@ -633,7 +645,7 @@ function modifyConfigsFromCIDR(baseConfigs) {
             let currentIp = ip;
 
             while (currentIp.match(ipaddr.parseCIDR(ipRange.trim())) && count < outputCount) {
-                generatedOutput += replaceIPAndPortInConfig(config.trim(), currentIp);
+                generatedOutput += replaceIPAndPortInConfig(config.trim(), currentIp, null, count + 1);
                 count++;
                 currentIp = incrementIP(currentIp);
             }
@@ -691,7 +703,7 @@ function modifyConfigsFromList(baseConfigs) {
     for (const config of baseConfigs) {
         for (const endpoint of validEndpoints) {
             const parsedIp = ipaddr.parse(endpoint.ip);
-            generatedOutput += replaceIPAndPortInConfig(config.trim(), parsedIp, endpoint.port);
+            generatedOutput += replaceIPAndPortInConfig(config.trim(), parsedIp, endpoint.port, count + 1);
             count++;
         }
     }
@@ -731,7 +743,7 @@ function modifyConfigsFromConfigsList(baseConfigs) {
                     portPart = parseInt(parts[1]);
                 }
 
-                generatedOutput += replaceIPAndPortInConfig(baseConfig.trim(), ipPart, portPart);
+                generatedOutput += replaceIPAndPortInConfig(baseConfig.trim(), ipPart, portPart, count + 1);
                 count++;
             }
         }
@@ -753,7 +765,7 @@ function modifyConfigsFromSNISpoof(baseConfigs) {
     let count = 0;
 
     for (const config of baseConfigs) {
-        generatedOutput += replaceIPAndPortInConfig(config.trim(), spoofIp, spoofPort);
+        generatedOutput += replaceIPAndPortInConfig(config.trim(), spoofIp, spoofPort, count + 1);
         count++;
     }
 
@@ -789,15 +801,31 @@ function extractAddressFromConfig(config) {
     return null;
 }
 
-function replaceIPAndPortInConfig(inputConfig, ipOrAddress, newPort = null) {
+function replaceIPAndPortInConfig(inputConfig, ipOrAddress, newPort = null, index = 1) {
     let configType = detectConfigType(inputConfig);
     let addressStr = typeof ipOrAddress === 'string' ? ipOrAddress : ipOrAddress.toString();
     let result = '';
+
+    const nameStyle = document.getElementById('configNameStyle')?.value || 'keep';
+    const namePrefix = document.getElementById('configNamePrefix')?.value.trim() || '';
+
+    let newName = '';
+    if (nameStyle === 'fixed') {
+        newName = namePrefix;
+    } else if (nameStyle === 'numeric') {
+        newName = `${namePrefix}${index}`;
+    } else if (nameStyle === 'random') {
+        const rand = Math.random().toString(36).substring(2, 7);
+        newName = `${namePrefix}${rand}`;
+    }
 
     if (configType === 'vmess') {
         let vmessConfig = JSON.parse(Base64.decode(inputConfig.replace('vmess://', '')));
         vmessConfig.add = addressStr;
         if (newPort) vmessConfig.port = parseInt(newPort);
+        if (nameStyle !== 'keep') {
+            vmessConfig.ps = newName;
+        }
         result = `vmess://${Base64.encode(JSON.stringify(vmessConfig))}\n`;
     } else if (configType === 'vless') {
         if (addressStr.includes(':') && !addressStr.startsWith('[')) {
@@ -806,16 +834,47 @@ function replaceIPAndPortInConfig(inputConfig, ipOrAddress, newPort = null) {
         const match = inputConfig.match(/^(vless:\/\/[^@]+)@([^:]+):(\d+)(.*)$/);
         if (match) {
             const [_, start, domain, port, end] = match;
-            result = `${start}@${addressStr}:${newPort || port}${end}\n`;
+            let updatedEnd = end;
+            if (nameStyle !== 'keep') {
+                const hashIndex = end.indexOf('#');
+                if (hashIndex !== -1) {
+                    updatedEnd = end.substring(0, hashIndex) + '#' + newName;
+                } else {
+                    updatedEnd = end + '#' + newName;
+                }
+            }
+            result = `${start}@${addressStr}:${newPort || port}${updatedEnd}\n`;
         } else {
             result = inputConfig + '\n';
         }
     } else if (configType === 'wireguard') {
         const regex = /^(wireguard:\/\/[^@]+@)[^:]+:(\d+)(.*)$/;
-        result = inputConfig.replace(regex, (m, p1, p2, p3) => `${p1}${addressStr}:${newPort || p2}${p3}\n`);
+        result = inputConfig.replace(regex, (m, p1, p2, p3) => {
+            let updatedP3 = p3;
+            if (nameStyle !== 'keep') {
+                const hashIndex = p3.indexOf('#');
+                if (hashIndex !== -1) {
+                    updatedP3 = p3.substring(0, hashIndex) + '#' + newName;
+                } else {
+                    updatedP3 = p3 + '#' + newName;
+                }
+            }
+            return `${p1}${addressStr}:${newPort || p2}${updatedP3}\n`;
+        });
     } else if (configType === 'trojan') {
         const regex = /^(trojan:\/\/[^@]+@)[^:]+:(\d+)(.*)$/;
-        result = inputConfig.replace(regex, (m, p1, p2, p3) => `${p1}${addressStr}:${newPort || p2}${p3}\n`);
+        result = inputConfig.replace(regex, (m, p1, p2, p3) => {
+            let updatedP3 = p3;
+            if (nameStyle !== 'keep') {
+                const hashIndex = p3.indexOf('#');
+                if (hashIndex !== -1) {
+                    updatedP3 = p3.substring(0, hashIndex) + '#' + newName;
+                } else {
+                    updatedP3 = p3 + '#' + newName;
+                }
+            }
+            return `${p1}${addressStr}:${newPort || p2}${updatedP3}\n`;
+        });
     }
 
     return result;
@@ -904,5 +963,6 @@ function downloadOutput() {
 
 // Initialize App Core (directly, since DOM is already loaded)
 toggleInputFields();
+toggleNamingFields();
 updateOutputCountValue();
 updateScanSampleCount();

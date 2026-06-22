@@ -185,6 +185,12 @@ async function startScanning() {
     document.getElementById('scanResultsTableBody').innerHTML = '';
     document.getElementById('scanResultsSection').style.display = 'none';
     
+    const logDiv = document.getElementById('scannerLog');
+    if (logDiv) {
+        logDiv.style.display = 'block';
+        logDiv.innerHTML = '<div>[System] Preparing scan...</div>';
+    }
+    
     const provider = document.getElementById('scanProvider').value;
     const threadCount = parseInt(document.getElementById('scanThreads').value) || 50;
     const timeout = parseInt(document.getElementById('scanTimeout').value) || 1500;
@@ -234,7 +240,7 @@ async function startScanning() {
             const key = `${sampledIp}:${randomPort}`;
             if (!candidateKeys.has(key)) {
                 candidateKeys.add(key);
-                candidates.push({ ip: sampledIp, port: randomPort });
+                candidates.push({ ip: sampledIp, port: randomPort, range: currentCidr });
             }
         }
         rangeIndex = (rangeIndex + 1) % ranges.length;
@@ -243,6 +249,11 @@ async function startScanning() {
     if (candidates.length === 0) {
         showWarning("Could not parse IP ranges or sample any candidates.");
         return;
+    }
+
+    if (logDiv) {
+        logDiv.innerHTML += `<div>[System] Generated ${candidates.length} candidates evenly across ${ranges.length} ranges. Testing...</div>`;
+        logDiv.scrollTop = logDiv.scrollHeight;
     }
     
     scanActive = true;
@@ -275,8 +286,16 @@ async function startScanning() {
                         scanResults.push({ ip: current.ip, port: current.port, latency });
                         scanResults.sort((a, b) => a.latency - b.latency);
                         renderResultsTable();
+                        if (logDiv) {
+                            logDiv.innerHTML += `<div style="color: var(--success);">[✓] Responsive: ${current.ip}:${current.port} (${latency}ms) [Range: ${current.range}]</div>`;
+                            logDiv.scrollTop = logDiv.scrollHeight;
+                        }
                     } else {
                         console.log(`Filtered out IP ${current.ip}:${current.port} with low latency: ${latency}ms (potential fake reset)`);
+                        if (logDiv) {
+                            logDiv.innerHTML += `<div style="color: var(--text-muted); opacity: 0.7;">[x] Filtered: ${current.ip}:${current.port} (${latency}ms) - potential fake reset [Range: ${current.range}]</div>`;
+                            logDiv.scrollTop = logDiv.scrollHeight;
+                        }
                     }
                 }
                 

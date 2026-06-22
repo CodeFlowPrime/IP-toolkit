@@ -23,6 +23,11 @@ const IP_RANGES_DATABASE = {
     fastly: [
         "151.101.0.0/16", "199.232.0.0/16", "104.156.80.0/20", "151.101.0.0/16",
         "167.99.192.0/18", "185.199.108.0/22", "23.235.32.0/20", "43.249.72.0/22"
+    ],
+    arvancloud: [
+        "185.143.232.0/22", "188.229.116.16/30", "94.101.182.0/27", "2.144.3.128/28",
+        "37.32.16.0/27", "37.32.17.0/27", "37.32.18.0/27", "37.32.19.0/27",
+        "185.215.232.0/22", "178.131.120.48/28", "94.101.183.0/28", "78.157.36.112/28"
     ]
 };
 
@@ -110,6 +115,16 @@ function onScanProviderChange() {
         customCidrGroup.style.display = 'block';
     } else {
         customCidrGroup.style.display = 'none';
+    }
+
+    // Auto-adjust min latency filter based on provider
+    const minLatencySelect = document.getElementById('scanMinLatency');
+    if (minLatencySelect) {
+        if (provider === 'arvancloud') {
+            minLatencySelect.value = "0"; // Disabled for domestic CDN (low native latency)
+        } else {
+            minLatencySelect.value = "20"; // Reset to default 20ms for foreign CDNs
+        }
     }
 }
 

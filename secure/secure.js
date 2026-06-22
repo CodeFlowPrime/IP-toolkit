@@ -305,59 +305,87 @@ async function startScanning() {
     document.getElementById('progressBarFill').style.width = '0%';
     document.getElementById('progressStatusText').textContent = 'Scanning: Discovery Phase...';
 
-    // Allocate budgets dynamically across selected ranges
+    // 1. Allocate budgets dynamically across selected ranges
     const rangeBudgets = new Array(ranges.length).fill(Math.floor(sampleSize / ranges.length));
     let remainder = sampleSize % ranges.length;
     for (let i = 0; i < remainder; i++) {
         rangeBudgets[i]++;
     }
 
-    // Generate unique random candidates directly from CIDRs
-    const candidates = [];
+    const scoutBudgets = [];
+    const focusBudgets = [];
+    for (let i = 0; i < ranges.length; i++) {
+        const b = rangeBudgets[i];
+        const s = Math.max(1, Math.min(b - 1, Math.floor(b * 0.25)));
+        scoutBudgets.push(s);
+        focusBudgets.push(b - s);
+    }
+
+    const scoutCandidates = [];
     const uniqueKeys = new Set();
-    
+    const rangeSubnets = {}; // Cache subnets for Phase 2
+
+    // 2. Generate Scout Candidates
     for (let i = 0; i < ranges.length; i++) {
         const range = ranges[i];
-        const budget = rangeBudgets[i];
-        let attempts = 0;
-        const maxAttempts = budget * 20; // Allow enough attempts to find unique IPs
-        let generatedForRange = 0;
+        const budget = scoutBudgets[i];
+        const subnets = getSubnets24(range);
+        rangeSubnets[range] = subnets; // Cache it
         
-        while (generatedForRange < budget && attempts < maxAttempts) {
+        if (subnets.length === 0) continue;
+        shuffleArray(subnets);
+
+        let attempts = 0;
+        const maxAttempts = budget * 20;
+        let generated = 0;
+
+        while (generated < budget && attempts < maxAttempts) {
             attempts++;
-            const ip = sampleIpFromCidr(range);
+            const sub = subnets[generated % subnets.length];
+            const ip = sampleIpFromCidr(sub);
             if (ip) {
                 const port = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
                 const key = `${ip}:${port}`;
                 if (!uniqueKeys.has(key)) {
                     uniqueKeys.add(key);
-                    candidates.push({ ip, port, range });
-                    generatedForRange++;
+                    scoutCandidates.push({ ip, port, range, subnet: sub });
+                    generated++;
                 }
             }
         }
     }
 
-    if (candidates.length === 0) {
+    if (scoutCandidates.length === 0) {
         showWarning("No candidates could be generated. Please check your ranges.");
         finalizeScan();
         return;
     }
 
-    // Shuffle candidates so requests to different ranges are interleaved
-    shuffleArray(candidates);
+    // Shuffle scout candidates so requests to different ranges are interleaved
+    shuffleArray(scoutCandidates);
 
-    const actualSampleSize = candidates.length;
-    document.getElementById('statTotal').textContent = actualSampleSize;
-    document.getElementById('progressStatusText').textContent = 'Scanning: Testing candidates...';
+    // Calculate total Focus budget that will be generated
+    let totalFocusBudget = 0;
+    for (let i = 0; i < ranges.length; i++) {
+        const range = ranges[i];
+        if (rangeSubnets[range] && rangeSubnets[range].length > 0) {
+            totalFocusBudget += focusBudgets[i];
+        }
+    }
+
+    const totalEstimatedCandidates = scoutCandidates.length + totalFocusBudget;
+    document.getElementById('statTotal').textContent = totalEstimatedCandidates;
+    document.getElementById('progressStatusText').textContent = 'Scanning: Scouting Phase...';
 
     if (logDiv) {
-        logDiv.innerHTML += `<div>[System] Starting scan with ${actualSampleSize} candidates across ${ranges.length} ranges...</div>`;
-        ranges.forEach((r, idx) => {
-            logDiv.innerHTML += `<div style="font-size: 0.7rem; color: var(--text-muted);"> - ${r}: ${rangeBudgets[idx]} candidates</div>`;
-        });
+        logDiv.innerHTML += `<div>[System] Phase 1: Scouting ${scoutCandidates.length} candidates across ${ranges.length} ranges...</div>`;
         logDiv.scrollTop = logDiv.scrollHeight;
     }
+
+    const activeSubnetsPerRange = {};
+    ranges.forEach(r => {
+        activeSubnetsPerRange[r] = new Set();
+    });
 
     let index = 0;
     let scannedCount = 0;
@@ -405,6 +433,10 @@ async function startScanning() {
                     scanResults.sort((a, b) => a.latency - b.latency);
                     renderResultsTable();
                     
+                    if (current.subnet) {
+                        activeSubnetsPerRange[current.range].add(current.subnet);
+                    }
+                    
                     if (logDiv) {
                         const pingsStr = latencies.join('ms, ') + 'ms';
                         logDiv.innerHTML += `<div style="color: var(--success);">[✓] Responsive: ${current.ip}:${current.port} (Avg: ${avgLatency}ms, Pings: [${pingsStr}]) [Range: ${current.range}]</div>`;
@@ -424,7 +456,7 @@ async function startScanning() {
                 
                 document.getElementById('statScanned').textContent = scannedCount;
                 document.getElementById('statHealthy').textContent = healthyCount;
-                const percent = Math.round((scannedCount / actualSampleSize) * 100);
+                const percent = Math.round((scannedCount / totalEstimatedCandidates) * 100);
                 document.getElementById('progressBarFill').style.width = `${Math.min(100, percent)}%`;
             } catch (e) {
                 console.error(e);
@@ -447,8 +479,60 @@ async function startScanning() {
         await Promise.all(workers);
     }
 
-    // Run the unified scan with the user-defined testCount
-    await executePhase(candidates, testCount);
+    // Execute Scouting Phase (1 ping per candidate)
+    await executePhase(scoutCandidates, 1);
+    
+    if (!scanActive) {
+        finalizeScan();
+        return;
+    }
+
+    // Generate Focus Candidates
+    const focusCandidates = [];
+    
+    for (let i = 0; i < ranges.length; i++) {
+        const range = ranges[i];
+        const budget = focusBudgets[i];
+        if (budget <= 0) continue;
+        
+        const activeSubs = Array.from(activeSubnetsPerRange[range]);
+        const subnets = rangeSubnets[range];
+        if (!subnets || subnets.length === 0) continue;
+        
+        const sourceSubnets = activeSubs.length > 0 ? activeSubs : subnets;
+        // Shuffle source subnets to maximize diversity
+        shuffleArray(sourceSubnets);
+
+        let attempts = 0;
+        const maxAttempts = budget * 20;
+        let generated = 0;
+
+        while (generated < budget && attempts < maxAttempts) {
+            attempts++;
+            const sub = sourceSubnets[generated % sourceSubnets.length];
+            const ip = sampleIpFromCidr(sub);
+            if (ip) {
+                const port = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
+                const key = `${ip}:${port}`;
+                if (!uniqueKeys.has(key)) {
+                    uniqueKeys.add(key);
+                    focusCandidates.push({ ip, port, range, subnet: sub });
+                    generated++;
+                }
+            }
+        }
+    }
+
+    if (focusCandidates.length > 0 && scanActive) {
+        document.getElementById('progressStatusText').textContent = 'Scanning: Focused Phase...';
+        if (logDiv) {
+            logDiv.innerHTML += `<div>[System] Phase 2: Testing ${focusCandidates.length} candidates in active subnets (Stability count: ${testCount})...</div>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+        
+        // Execute Focused Phase (testCount pings per candidate)
+        await executePhase(focusCandidates, testCount);
+    }
     
     finalizeScan();
 

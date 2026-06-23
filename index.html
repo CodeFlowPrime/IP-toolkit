@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>V2Ray Cloudflare Scanner & Config Generator</title>
+    <title>IP Tools</title>
     <meta name="description" content="A premium web-based tool to scan Cloudflare IPs and generate V2Ray configurations (VLESS, VMESS, Trojan, WireGuard)">
     <link rel="stylesheet" href="style.css">
 </head>
@@ -68,11 +68,7 @@
                 </button>
             </div>
 
-            <!-- Global Alert MessageBox -->
-            <div class="alert" id="messageBox" style="display: none;">
-                <svg id="alertIcon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></svg>
-                <span id="messageText"></span>
-            </div>
+
 
             <!-- TAB 1: IP SCANNER -->
             <div id="scannerPanel" class="glass-card">
@@ -463,6 +459,9 @@
 
         </main>
     </div>
+
+    <!-- Toast Notifications Container -->
+    <div id="toastContainer" class="toast-container"></div>
 
     <!-- JS Scripts (using standard libraries) -->
     <script src="https://cdn.jsdelivr.net/npm/js-sha256@0.11.0/src/sha256.min.js"></script>

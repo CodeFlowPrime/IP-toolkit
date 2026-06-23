@@ -198,9 +198,8 @@ function parseCIDRBlock(cidrStr) {
                       (octets[3] >>> 0);
                       
         const hostBits = 32 - mask;
-        const netmask = mask === 0 ? 0 : (~((1 << hostBits) - 1)) >>> 0;
-        const startNum = (ipNum & netmask) >>> 0;
         const capacity = Math.pow(2, hostBits);
+        const startNum = (ipNum - (ipNum % capacity)) >>> 0;
         const endNum = (startNum + capacity - 1) >>> 0;
         
         return {
@@ -274,11 +273,6 @@ function distributeBudget(subnets, totalBudget) {
                 if (currentAlloc < s.capacity) {
                     allocations.set(s, currentAlloc + 1);
                     rem--;
-                    if (currentAlloc + 1 === s.capacity) {
-                        activeSubnets.delete(s);
-                    }
-                } else {
-                    activeSubnets.delete(s);
                 }
             }
             remainingBudget = rem;
@@ -311,6 +305,71 @@ function distributeBudget(subnets, totalBudget) {
     return allocations;
 }
 
+// Proportional budget distribution that respects Quality Scores and capacity limits
+function distributeProportionalBudget(subnets, targetBudgets) {
+    const allocations = new Map();
+    subnets.forEach(s => allocations.set(s, 0));
+    
+    let remainingBudget = 0;
+    subnets.forEach(s => {
+        remainingBudget += targetBudgets.get(s) || 0;
+    });
+    
+    let activeSubnets = new Set(subnets);
+    
+    // First pass: allocate up to target budget or capacity
+    subnets.forEach(s => {
+        const target = targetBudgets.get(s) || 0;
+        const alloc = Math.min(s.capacity, target);
+        allocations.set(s, alloc);
+        remainingBudget -= alloc;
+        if (alloc === s.capacity) {
+            activeSubnets.delete(s);
+        }
+    });
+    
+    // Second pass: distribute any surplus/remainder to non-saturated subnets
+    while (remainingBudget > 0 && activeSubnets.size > 0) {
+        const share = Math.floor(remainingBudget / activeSubnets.size);
+        const remainder = remainingBudget % activeSubnets.size;
+        
+        if (share === 0) {
+            let rem = remainingBudget;
+            for (const s of activeSubnets) {
+                if (rem === 0) break;
+                const currentAlloc = allocations.get(s);
+                if (currentAlloc < s.capacity) {
+                    allocations.set(s, currentAlloc + 1);
+                    rem--;
+                }
+            }
+            remainingBudget = rem;
+            break;
+        }
+        
+        let newSurplus = 0;
+        let saturatedThisRound = [];
+        
+        for (const s of activeSubnets) {
+            const currentAlloc = allocations.get(s);
+            const targetAlloc = currentAlloc + share;
+            
+            if (targetAlloc >= s.capacity) {
+                allocations.set(s, s.capacity);
+                newSurplus += (targetAlloc - s.capacity);
+                saturatedThisRound.push(s);
+            } else {
+                allocations.set(s, targetAlloc);
+            }
+        }
+        
+        saturatedThisRound.forEach(s => activeSubnets.delete(s));
+        remainingBudget = newSurplus + remainder;
+    }
+    
+    return allocations;
+}
+
 // Global scanner state extensions
 let scanStartTime = 0;
 let totalPingsExpected = 0;
@@ -335,7 +394,7 @@ function getLatencyScore(avgLatency, timeout) {
     return Math.max(0, 1 - (avgLatency - minL) / (timeout - minL));
 }
 
-// Jitter score: 1.0 for 0ms jitter, decreasing linearly to 0 at 100ms
+// Jitter score: 1.0 for 0ms jitter, decreasing linearly to 100ms
 function getJitterScore(jitter) {
     if (jitter === undefined || isNaN(jitter)) return 0;
     return Math.max(0, 1 - jitter / 100);
@@ -396,7 +455,7 @@ function renderTopCandidatesTable() {
         
         html += `
             <tr>
-                <td style="font-family: monospace; font-weight: 600;">${item.ip}</td>
+                <td style="font-family: monospace; font-weight: 600; cursor: pointer; text-decoration: underline dotted;" onclick="copySingleIpText('${item.ip}')" title="Click to copy IP">${item.ip}</td>
                 <td><span class="slider-val" style="background: var(--bg-tertiary); color: var(--text-primary); border-radius: 4px; padding: 0.1rem 0.3rem;">${item.port}</span></td>
                 <td style="font-family: monospace;">${item.latency} ms</td>
                 <td style="font-family: monospace;">${Math.round(item.stability * 100)}%</td>
@@ -496,7 +555,6 @@ function recalculateSubnetScore(subnet, timeout) {
     
     const latencyScore = getLatencyScore(avgLatency, timeout);
     if (responsiveCount === 0) {
-        // Fallback score if no validation candidates tested yet
         subnet.qualityScore = successRate * (0.5 * latencyScore + 0.5) * 100;
         return;
     }
@@ -707,11 +765,21 @@ async function startScanning() {
             if (!current) break;
             
             const subnet = current.subnet;
-            const latency = await testIpConnection(current.ip, current.port, timeout, minLatency);
+            const res = await testIpConnection(current.ip, current.port, timeout);
+            const duration = res.duration;
+            let latency = null;
             
             completedPingsCount++;
             subnet.attempts++;
             subnet.completedCount++;
+            
+            if (res.success) {
+                latency = duration;
+            } else if (res.error !== 'timeout' && res.error !== 'inactive' && duration !== null) {
+                if (duration >= minLatency) {
+                    latency = duration;
+                }
+            }
             
             const scannedCount = parsedSubnets.reduce((sum, s) => sum + s.completedCount, 0);
             const healthyCount = parsedSubnets.reduce((sum, s) => sum + s.healthyCount, 0);
@@ -747,6 +815,12 @@ async function startScanning() {
                 
                 if (logDiv) {
                     logDiv.innerHTML += `<div style="color: var(--success);">[✓] Scouting Responsive: ${current.ip}:${current.port} (${latency}ms)</div>`;
+                    logDiv.scrollTop = logDiv.scrollHeight;
+                }
+            } else {
+                if (logDiv && res.error === 'timeout') {
+                } else if (logDiv && duration !== null && duration < minLatency) {
+                    logDiv.innerHTML += `<div style="color: var(--text-muted); opacity: 0.6;">[x] Filtered: ${current.ip}:${current.port} (${duration}ms) - below minLatency (${minLatency}ms)</div>`;
                     logDiv.scrollTop = logDiv.scrollHeight;
                 }
             }
@@ -816,10 +890,12 @@ async function startScanning() {
         };
     });
     
-    const validationAllocations = distributeBudget(
-        parsedSubnets, 
-        combinedBudgets.reduce((sum, item) => sum + item.targetBudget, 0)
-    );
+    const targetBudgetsMap = new Map();
+    combinedBudgets.forEach(item => {
+        targetBudgetsMap.set(item.subnet, item.targetBudget);
+    });
+    
+    const validationAllocations = distributeProportionalBudget(parsedSubnets, targetBudgetsMap);
     
     parsedSubnets.forEach(s => {
         s.validationBudget = validationAllocations.get(s) || 0;
@@ -878,13 +954,23 @@ async function startScanning() {
             for (let t = 0; t < testCount; t++) {
                 if (!scanActive) break;
                 
-                const latency = await testIpConnection(current.ip, current.port, timeout, minLatency);
+                const res = await testIpConnection(current.ip, current.port, timeout);
+                const duration = res.duration;
                 completedPingsCount++;
                 
-                if (latency !== null) {
+                let isSuccess = false;
+                if (res.success) {
+                    isSuccess = true;
+                } else if (res.error !== 'timeout' && res.error !== 'inactive' && duration !== null) {
+                    if (duration >= minLatency) {
+                        isSuccess = true;
+                    }
+                }
+                
+                if (isSuccess) {
                     successes++;
-                    latencies.push(latency);
-                    subnet.latencies.push(latency);
+                    latencies.push(duration);
+                    subnet.latencies.push(duration);
                 }
                 
                 triggerUIUpdate();
@@ -892,7 +978,7 @@ async function startScanning() {
             
             valScannedCount++;
             subnet.attempts += testCount;
-            subnet.completedCount += subnet.validationBudget > 0 ? 1 : 0; // Prevent overflow beyond budget
+            subnet.completedCount += subnet.validationBudget > 0 ? 1 : 0;
             
             const globalScanned = discoveryBudgetTotal + valScannedCount;
             const healthyCount = parsedSubnets.reduce((sum, s) => sum + s.healthyCount, 0);
@@ -942,8 +1028,7 @@ async function startScanning() {
                 recalculateCandidateScore(current.ip, current.port, subnet, timeout);
                 
                 if (logDiv) {
-                    const pingsStr = latencies.map(l => `${l}ms`).join(', ');
-                    logDiv.innerHTML += `<div style="color: var(--success);">[✓] Responsive candidate: ${current.ip}:${current.port} (RTT: ${avg}ms, Jitter: ${Math.round(jitter)}ms, Stability: ${Math.round(stability * 100)}%)</div>`;
+                    logDiv.innerHTML += `<div style="color: var(--success);">[✓] Validation Responsive: ${current.ip}:${current.port} (RTT: ${avg}ms, Jitter: ${Math.round(jitter)}ms, Stability: ${Math.round(stability * 100)}%)</div>`;
                     logDiv.scrollTop = logDiv.scrollHeight;
                 }
             }
@@ -969,7 +1054,122 @@ async function startScanning() {
     // PHASE 3: DEEP SCAN & FINAL RANKING
     // ==========================================
     if (scanActive) {
-        updateScanStatus('Ranking and finalizing candidates...', 'deep', 50, "Finalizing");
+        const actualDeepCandidates = topCandidates.slice(0, 10);
+        const deepTestCount = Math.max(5, testCount * 2);
+        
+        if (actualDeepCandidates.length > 0) {
+            if (logDiv) {
+                logDiv.innerHTML += `<div>[System] Phase 3: Deep Scan started on top ${actualDeepCandidates.length} candidates (${deepTestCount} pings each)...</div>`;
+                logDiv.scrollTop = logDiv.scrollHeight;
+            }
+            
+            totalPingsExpected = completedPingsCount + (actualDeepCandidates.length * deepTestCount);
+            
+            let deepIndex = 0;
+            let deepScannedCount = 0;
+            
+            async function runDeepWorker() {
+                while (deepIndex < actualDeepCandidates.length && scanActive) {
+                    const current = actualDeepCandidates[deepIndex++];
+                    if (!current) break;
+                    
+                    const subnet = parsedSubnets.find(s => s.cidr === current.subnetCidr);
+                    if (!subnet) continue;
+                    
+                    const candKey = `${current.ip}:${current.port}`;
+                    const cand = subnet.responsiveCandidates.get(candKey);
+                    if (!cand) continue;
+                    
+                    const latencies = [];
+                    let successes = 0;
+                    
+                    for (let t = 0; t < deepTestCount; t++) {
+                        if (!scanActive) break;
+                        
+                        const res = await testIpConnection(current.ip, current.port, timeout);
+                        completedPingsCount++;
+                        
+                        let isSuccess = false;
+                        if (res.success) {
+                            isSuccess = true;
+                        } else if (res.error !== 'timeout' && res.error !== 'inactive' && res.duration !== null) {
+                            if (res.duration >= minLatency) {
+                                isSuccess = true;
+                            }
+                        }
+                        
+                        if (isSuccess) {
+                            successes++;
+                            latencies.push(res.duration);
+                            subnet.latencies.push(res.duration);
+                            cand.latencies.push(res.duration);
+                        }
+                        
+                        triggerUIUpdate();
+                    }
+                    
+                    deepScannedCount++;
+                    subnet.attempts += deepTestCount;
+                    subnet.successes += successes;
+                    cand.attempts += deepTestCount;
+                    cand.successes += successes;
+                    
+                    const phaseProgress = (deepScannedCount / actualDeepCandidates.length) * 100;
+                    updateScanStatus(
+                        `Deep probing ${current.ip}:${current.port}`, 
+                        'deep', 
+                        phaseProgress, 
+                        `${deepScannedCount}/${actualDeepCandidates.length}`
+                    );
+                    
+                    if (successes > 0) {
+                        const allLats = cand.latencies;
+                        const avg = Math.round(allLats.reduce((a, b) => a + b, 0) / allLats.length);
+                        let jitter = 0;
+                        if (allLats.length > 1) {
+                            let diffSum = 0;
+                            for (let i = 0; i < allLats.length - 1; i++) {
+                                diffSum += Math.abs(allLats[i+1] - allLats[i]);
+                            }
+                            jitter = diffSum / (allLats.length - 1);
+                        }
+                        
+                        let stdDev = 0;
+                        if (allLats.length > 0) {
+                            const variance = allLats.reduce((sum, val) => sum + Math.pow(val - avg, 2), 0) / allLats.length;
+                            stdDev = Math.sqrt(variance);
+                        }
+                        const stability = avg > 0 ? 1 - Math.min(1, stdDev / avg) : 0;
+                        
+                        cand.stability = stability;
+                        cand.jitter = jitter;
+                        
+                        recalculateCandidateScore(current.ip, current.port, subnet, timeout);
+                        
+                        if (logDiv) {
+                            logDiv.innerHTML += `<div style="color: var(--accent-color);">[✓] Deep scan result: ${current.ip}:${current.port} (Avg: ${avg}ms, Jitter: ${Math.round(jitter)}ms, Stability: ${Math.round(stability * 100)}%)</div>`;
+                            logDiv.scrollTop = logDiv.scrollHeight;
+                        }
+                    }
+                    
+                    recalculateSubnetScore(subnet, timeout);
+                    triggerUIUpdate();
+                }
+            }
+            
+            const deepThreads = Math.min(3, actualDeepCandidates.length);
+            const workers = [];
+            for (let i = 0; i < deepThreads; i++) {
+                workers.push(runDeepWorker());
+            }
+            await Promise.all(workers);
+        } else {
+            if (logDiv) {
+                logDiv.innerHTML += `<div>[System] Phase 3: Skipped (no healthy candidates found)</div>`;
+                logDiv.scrollTop = logDiv.scrollHeight;
+            }
+            updateScanStatus('No candidates to deep scan.', 'deep', 100, "Skipped");
+        }
         
         parsedSubnets.forEach(s => {
             recalculateSubnetScore(s, timeout);
@@ -1018,10 +1218,10 @@ function stopScanning() {
     showWarning("Scan stopped. Results gathered so far are displayed below.");
 }
 
-function testIpConnection(ip, port, timeout, minLatency = 20) {
+function testIpConnection(ip, port, timeout) {
     return new Promise((resolve) => {
         if (!scanActive) {
-            resolve(null);
+            resolve({ success: false, duration: null, error: 'inactive' });
             return;
         }
         
@@ -1046,11 +1246,7 @@ function testIpConnection(ip, port, timeout, minLatency = 20) {
             const duration = Math.round(performance.now() - startTime);
             clearTimeout(timeoutId);
             removeController(controller);
-            if (duration < minLatency) {
-                resolve(null);
-            } else {
-                resolve(duration);
-            }
+            resolve({ success: true, duration, error: null });
         })
         .catch(err => {
             const duration = Math.round(performance.now() - startTime);
@@ -1058,13 +1254,9 @@ function testIpConnection(ip, port, timeout, minLatency = 20) {
             removeController(controller);
             
             if (err.name === 'AbortError') {
-                resolve(null);
+                resolve({ success: false, duration: null, error: 'timeout' });
             } else {
-                if (duration >= minLatency && duration < timeout) {
-                    resolve(duration);
-                } else {
-                    resolve(null);
-                }
+                resolve({ success: false, duration, error: err.message || 'NetworkError' });
             }
         });
     });
@@ -1091,7 +1283,7 @@ function renderResultsTable() {
         
         html += `
             <tr>
-                <td style="font-family: monospace; font-weight: 600;">${item.ip}</td>
+                <td style="font-family: monospace; font-weight: 600; cursor: pointer; text-decoration: underline dotted;" onclick="copySingleIpText('${item.ip}')" title="Click to copy IP">${item.ip}</td>
                 <td><span class="slider-val" style="background: var(--bg-tertiary); color: var(--text-primary); border-radius: 4px;">${item.port}</span></td>
                 <td><span class="ping-badge ${pingClass}">${item.latency} ms</span></td>
                 <td><span style="color: var(--success); font-weight: 600;">✓ Responsive</span></td>
@@ -1105,6 +1297,10 @@ function renderResultsTable() {
     });
     
     tbody.innerHTML = html;
+}
+
+function copySingleIpText(ip) {
+    copyTextToClipboard(ip, () => showSuccess(`Copied IP ${ip} to clipboard.`));
 }
 
 function getScannedIPText() {

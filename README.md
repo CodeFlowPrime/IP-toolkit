@@ -29,7 +29,7 @@ Scan CDN IP addresses directly from your browser without using external tools or
 - **Live Logging Console:** Watch the real-time breakdown of tested ranges and responses directly in the scanner console.
 - **High Performance:** Multi-threaded architecture ($O(1)$ lookup matching) capable of generating and scanning up to **50,000** IP candidates instantly.
 - **Live Metrics:** Real-time progress bar, latency display, and sortable results.
-- **Exporting Options:** Copy working IPs, download as text file, or export directly to the Config Generator.
+- **Exporting Options:** Copy working IPs (bulk or individual click-to-copy), download as text file, or export directly to the Config Generator.
 
 ### 2. 🛠️ Bulk Config Generator / Modifier
 Modify or generate hundreds of V2Ray/Xray configs in bulk using clean IP addresses.

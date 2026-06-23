@@ -1132,7 +1132,8 @@ tr:hover td {
         padding: 0.75rem 1rem;
     }
     .logo-text p {
-        display: none; /* Hide subtitle on tiny screens to prevent header overflow */
+        font-size: 0.65rem;
+        margin-top: 0.15rem;
     }
     .logo-text h1 {
         font-size: 1.1rem;

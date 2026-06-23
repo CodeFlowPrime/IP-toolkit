@@ -215,6 +215,35 @@ function parseCIDRBlock(cidrStr) {
     }
 }
 
+// Dynamically split a CIDR block into subnets of a target capacity
+function splitCIDRBlockIntoSubnets(cidrStr, targetCapacity = 1024) {
+    const parsed = parseCIDRBlock(cidrStr);
+    if (!parsed) return [];
+    
+    // If the capacity is already within the target, no need to split
+    if (parsed.capacity <= targetCapacity) {
+        return [parsed];
+    }
+    
+    const subnets = [];
+    // We want each sub-subnet to have subCapacity <= targetCapacity
+    const hostBits = Math.floor(Math.log2(targetCapacity));
+    const subMask = 32 - hostBits;
+    const subCapacity = Math.pow(2, hostBits);
+    
+    for (let num = parsed.startNum; num <= parsed.endNum; num += subCapacity) {
+        const subCidr = `${numToIp(num)}/${subMask}`;
+        subnets.push({
+            cidr: subCidr,
+            startNum: num,
+            endNum: num + subCapacity - 1,
+            capacity: subCapacity,
+            mask: subMask
+        });
+    }
+    return subnets;
+}
+
 // Generate IP string from a subnet start number and host offset
 function getIpFromOffset(startNum, offset) {
     return numToIp((startNum + offset) >>> 0);
@@ -405,11 +434,26 @@ function renderSubnetsTable() {
     const tbody = document.getElementById('subnetsTableBody');
     if (!tbody) return;
     
+    // Filter to only include subnets that are actually allocated budget or have been active
+    const activeSubnetsList = parsedSubnets.filter(s => 
+        s.discoveryBudget > 0 || s.validationBudget > 0 || s.completedCount > 0
+    );
+    
+    // Sort active subnets: highest quality score first, then healthy count, then attempts
+    activeSubnetsList.sort((a, b) => {
+        if (b.qualityScore !== a.qualityScore) return b.qualityScore - a.qualityScore;
+        if (b.healthyCount !== a.healthyCount) return b.healthyCount - a.healthyCount;
+        return b.attempts - a.attempts;
+    });
+    
+    // Show top 15 subnets in the UI to prevent browser lagging
+    const displayLimit = 15;
+    const toRender = activeSubnetsList.slice(0, displayLimit);
+    
     let html = '';
-    parsedSubnets.forEach(s => {
+    toRender.forEach(s => {
         const totalBudget = s.discoveryBudget + s.validationBudget;
         const progressPercent = totalBudget > 0 ? Math.round((s.completedCount / totalBudget) * 100) : 0;
-        const avgLatStr = s.avgLatency ? `${s.avgLatency} ms` : '--';
         
         let scoreClass = 'quality-low';
         if (s.qualityScore >= 70) scoreClass = 'quality-high';
@@ -434,6 +478,20 @@ function renderSubnetsTable() {
             </tr>
         `;
     });
+    
+    if (activeSubnetsList.length > displayLimit) {
+        const extraCount = activeSubnetsList.length - displayLimit;
+        html += `
+            <tr>
+                <td colspan="7" style="text-align: center; color: var(--text-secondary); font-size: 0.8rem; padding: 0.5rem;">
+                    Showing top 15 of ${activeSubnetsList.length} active subnets (+${extraCount} more active subnets hidden)
+                </td>
+            </tr>
+        `;
+    } else if (activeSubnetsList.length === 0) {
+        html = `<tr><td colspan="7" style="text-align: center; color: var(--text-secondary); padding: 1rem;">No subnets allocated yet.</td></tr>`;
+    }
+    
     tbody.innerHTML = html;
 }
 
@@ -498,10 +556,16 @@ function updateScanStatus(currentAction, activePhase = null, phaseProgress = 0, 
             if (!card || !badge || !fill) return;
             
             if (p === activePhase) {
-                card.classList.add('active');
-                card.classList.remove('completed');
-                badge.className = 'phase-badge badge-active';
-                badge.textContent = 'Active';
+                if (phaseCountStr === "Skipped") {
+                    card.classList.remove('active', 'completed');
+                    badge.className = 'phase-badge badge-skipped';
+                    badge.textContent = 'Skipped';
+                } else {
+                    card.classList.add('active');
+                    card.classList.remove('completed');
+                    badge.className = 'phase-badge badge-active';
+                    badge.textContent = 'Active';
+                }
                 fill.style.width = `${phaseProgress}%`;
                 if (count) count.textContent = phaseCountStr;
                 if (percent) percent.textContent = `${Math.round(phaseProgress)}%`;
@@ -668,10 +732,34 @@ async function startScanning() {
         return;
     }
     
-    // Parse CIDR ranges
+    // Calculate total capacity across all ranges to dynamically partition them
+    let totalCidrCapacity = 0;
     ranges.forEach(r => {
-        const parsed = parseCIDRBlock(r);
-        if (parsed) {
+        const parts = r.trim().split('/');
+        const mask = parts.length === 2 ? parseInt(parts[1], 10) : 32;
+        if (!isNaN(mask) && mask >= 0 && mask <= 32) {
+            totalCidrCapacity += Math.pow(2, 32 - mask);
+        }
+    });
+    
+    let targetCapacity = 1024; // Default target capacity
+    if (totalCidrCapacity > 0 && sampleSize > 0) {
+        // Aim for about sampleSize * 1.5 subnets
+        const idealNumSubnets = sampleSize * 1.5;
+        const idealCapacity = totalCidrCapacity / idealNumSubnets;
+        const powerOf2 = Math.round(Math.log2(idealCapacity));
+        targetCapacity = Math.pow(2, Math.max(8, Math.min(13, powerOf2))); // cap capacity between 256 (2^8) and 8192 (2^13)
+    }
+    
+    if (logDiv) {
+        logDiv.innerHTML += `<div>[System] Dynamically partitioned subnet capacity target: ${targetCapacity} hosts</div>`;
+        logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    // Parse and split CIDR ranges
+    ranges.forEach(r => {
+        const subblocks = splitCIDRBlockIntoSubnets(r, targetCapacity);
+        subblocks.forEach(parsed => {
             parsedSubnets.push({
                 ...parsed,
                 discoveryBudget: 0,
@@ -686,7 +774,7 @@ async function startScanning() {
                 sampledOffsets: new Set(),
                 responsiveCandidates: new Map()
             });
-        }
+        });
     });
     
     if (parsedSubnets.length === 0) {
@@ -1163,25 +1251,33 @@ async function startScanning() {
                 workers.push(runDeepWorker());
             }
             await Promise.all(workers);
+            
+            parsedSubnets.forEach(s => {
+                recalculateSubnetScore(s, timeout);
+                for (const key of s.responsiveCandidates.keys()) {
+                    recalculateCandidateScore(key.split(':')[0], parseInt(key.split(':')[1]), s, timeout);
+                }
+            });
+            
+            scanResults = [...topCandidates].sort((a, b) => b.score - a.score);
+            renderResultsTable();
+            
+            updateScanStatus('Scan completed successfully!', 'deep', 100, "Completed");
         } else {
             if (logDiv) {
                 logDiv.innerHTML += `<div>[System] Phase 3: Skipped (no healthy candidates found)</div>`;
                 logDiv.scrollTop = logDiv.scrollHeight;
             }
-            updateScanStatus('No candidates to deep scan.', 'deep', 100, "Skipped");
+            
+            parsedSubnets.forEach(s => {
+                recalculateSubnetScore(s, timeout);
+            });
+            
+            scanResults = [...topCandidates].sort((a, b) => b.score - a.score);
+            renderResultsTable();
+            
+            updateScanStatus('No candidates to deep scan.', 'deep', 0, "Skipped");
         }
-        
-        parsedSubnets.forEach(s => {
-            recalculateSubnetScore(s, timeout);
-            for (const key of s.responsiveCandidates.keys()) {
-                recalculateCandidateScore(key.split(':')[0], parseInt(key.split(':')[1]), s, timeout);
-            }
-        });
-        
-        scanResults = [...topCandidates].sort((a, b) => b.score - a.score);
-        renderResultsTable();
-        
-        updateScanStatus('Scan completed successfully!', 'deep', 100, "Completed");
     }
     
     finalizeScan();
@@ -1225,40 +1321,51 @@ function testIpConnection(ip, port, timeout) {
             return;
         }
         
-        const controller = new AbortController();
-        activeControllers.push(controller);
+        let controller;
+        let timeoutId;
         
-        const timeoutId = setTimeout(() => {
-            controller.abort();
-        }, timeout);
-        
-        const startTime = performance.now();
-        const protocol = (port === 80 || port === 8080) ? 'http' : 'https';
-        const url = `${protocol}://${ip}:${port}/cdn-cgi/trace?_t=${Date.now()}`;
-        
-        fetch(url, {
-            mode: 'no-cors',
-            cache: 'no-store',
-            credentials: 'omit',
-            signal: controller.signal
-        })
-        .then(() => {
-            const duration = Math.round(performance.now() - startTime);
-            clearTimeout(timeoutId);
-            removeController(controller);
-            resolve({ success: true, duration, error: null });
-        })
-        .catch(err => {
-            const duration = Math.round(performance.now() - startTime);
-            clearTimeout(timeoutId);
-            removeController(controller);
+        try {
+            controller = new AbortController();
+            activeControllers.push(controller);
             
-            if (err.name === 'AbortError') {
-                resolve({ success: false, duration: null, error: 'timeout' });
-            } else {
-                resolve({ success: false, duration, error: err.message || 'NetworkError' });
-            }
-        });
+            timeoutId = setTimeout(() => {
+                try {
+                    controller.abort();
+                } catch (e) {}
+            }, timeout);
+            
+            const startTime = performance.now();
+            const protocol = (port === 80 || port === 8080) ? 'http' : 'https';
+            const url = `${protocol}://${ip}:${port}/cdn-cgi/trace?_t=${Date.now()}`;
+            
+            fetch(url, {
+                mode: 'no-cors',
+                cache: 'no-store',
+                credentials: 'omit',
+                signal: controller.signal
+            })
+            .then(() => {
+                const duration = Math.round(performance.now() - startTime);
+                clearTimeout(timeoutId);
+                removeController(controller);
+                resolve({ success: true, duration, error: null });
+            })
+            .catch(err => {
+                const duration = Math.round(performance.now() - startTime);
+                clearTimeout(timeoutId);
+                removeController(controller);
+                
+                if (err && err.name === 'AbortError') {
+                    resolve({ success: false, duration: null, error: 'timeout' });
+                } else {
+                    resolve({ success: false, duration, error: (err && err.message) || 'NetworkError' });
+                }
+            });
+        } catch (err) {
+            if (timeoutId) clearTimeout(timeoutId);
+            if (controller) removeController(controller);
+            resolve({ success: false, duration: null, error: err.message || 'SyncError' });
+        }
     });
 }
 
@@ -1302,6 +1409,7 @@ function renderResultsTable() {
 function copySingleIpText(ip) {
     copyTextToClipboard(ip, () => showSuccess(`Copied IP ${ip} to clipboard.`));
 }
+window.copySingleIpText = copySingleIpText;
 
 function getScannedIPText() {
     return scanResults.map(item => `${item.ip}:${item.port}`).join('\n');

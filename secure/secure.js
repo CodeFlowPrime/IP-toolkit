@@ -161,90 +161,406 @@ function updateScanSampleCount() {
     }
 }
 
-function sampleIpFromCidr(cidr) {
+// Convert IPv4 string to unsigned 32-bit integer
+function ipToNum(ipStr) {
+    const octets = ipStr.split('.').map(Number);
+    return ((octets[0] << 24) >>> 0) + 
+           ((octets[1] << 16) >>> 0) + 
+           ((octets[2] << 8) >>> 0) + 
+           (octets[3] >>> 0);
+}
+
+// Convert unsigned 32-bit integer to IPv4 string
+function numToIp(num) {
+    return [
+        (num >>> 24) & 0xFF,
+        (num >>> 16) & 0xFF,
+        (num >>> 8) & 0xFF,
+        num & 0xFF
+    ].join('.');
+}
+
+// Parse IPv4 CIDR range and calculate its details
+function parseCIDRBlock(cidrStr) {
     try {
-        const parts = cidr.trim().split('/');
+        const parts = cidrStr.trim().split('/');
         if (parts.length !== 2) return null;
-        
-        const ip = parts[0];
-        const mask = parseInt(parts[1]);
+        const ipStr = parts[0];
+        const mask = parseInt(parts[1], 10);
         if (isNaN(mask) || mask < 0 || mask > 32) return null;
         
-        const parsedIp = ipaddr.parse(ip);
-        if (parsedIp.kind() !== 'ipv4') return null;
-        
-        const octets = parsedIp.octets;
-        const ipNum = (octets[0] << 24) + (octets[1] << 16) + (octets[2] << 8) + octets[3];
-        
+        const parsed = ipaddr.parse(ipStr);
+        if (parsed.kind() !== 'ipv4') return null;
+        const octets = parsed.octets;
+        const ipNum = ((octets[0] << 24) >>> 0) + 
+                      ((octets[1] << 16) >>> 0) + 
+                      ((octets[2] << 8) >>> 0) + 
+                      (octets[3] >>> 0);
+                      
         const hostBits = 32 - mask;
-        const totalHosts = Math.pow(2, hostBits);
+        const netmask = mask === 0 ? 0 : (~((1 << hostBits) - 1)) >>> 0;
+        const startNum = (ipNum & netmask) >>> 0;
+        const capacity = Math.pow(2, hostBits);
+        const endNum = (startNum + capacity - 1) >>> 0;
         
-        let randomIndex = 0;
-        if (totalHosts > 4) {
-            randomIndex = Math.floor(Math.random() * (totalHosts - 2)) + 1;
-        } else {
-            randomIndex = Math.floor(Math.random() * totalHosts);
-        }
-        
-        const maxHostVal = totalHosts - 1;
-        const baseSubnet = ipNum & (~maxHostVal);
-        const targetIpNum = baseSubnet + randomIndex;
-        
-        return [
-            (targetIpNum >>> 24) & 0xFF,
-            (targetIpNum >>> 16) & 0xFF,
-            (targetIpNum >>> 8) & 0xFF,
-            targetIpNum & 0xFF
-        ].join('.');
+        return {
+            cidr: cidrStr,
+            startNum,
+            endNum,
+            capacity,
+            mask
+        };
     } catch (e) {
-        console.error("CIDR sampling error:", e);
+        console.error("Error parsing CIDR:", cidrStr, e);
         return null;
     }
 }
 
-function getSubnets24(cidr) {
-    try {
-        const parts = cidr.trim().split('/');
-        if (parts.length !== 2) return [];
-        const ip = parts[0];
-        const mask = parseInt(parts[1]);
-        if (isNaN(mask) || mask < 0 || mask > 32) return [];
+// Generate IP string from a subnet start number and host offset
+function getIpFromOffset(startNum, offset) {
+    return numToIp((startNum + offset) >>> 0);
+}
+
+// Generate an array of unique, random offsets within a capacity without duplication
+function sampleOffsets(capacity, count) {
+    const offsets = new Set();
+    if (count >= capacity) {
+        // If budget meets or exceeds capacity, take all possible offsets
+        const arr = [];
+        for (let i = 0; i < capacity; i++) {
+            arr.push(i);
+        }
+        return shuffleArray(arr);
+    }
+    
+    // For small capacity, generate all offsets, shuffle, and slice
+    if (capacity <= 10000) {
+        const arr = [];
+        for (let i = 0; i < capacity; i++) {
+            arr.push(i);
+        }
+        shuffleArray(arr);
+        return arr.slice(0, count);
+    }
+    
+    // For large capacity, do sparse random sampling with collision detection
+    while (offsets.size < count) {
+        const randVal = Math.floor(Math.random() * capacity);
+        offsets.add(randVal);
+    }
+    return Array.from(offsets);
+}
+
+// Fair budget distribution with capacity constraint and surplus redistribution
+function distributeBudget(subnets, totalBudget) {
+    const n = subnets.length;
+    if (n === 0) return new Map();
+    
+    const allocations = new Map();
+    subnets.forEach(s => allocations.set(s, 0));
+    
+    let remainingBudget = totalBudget;
+    let activeSubnets = new Set(subnets);
+    
+    while (remainingBudget > 0 && activeSubnets.size > 0) {
+        const share = Math.floor(remainingBudget / activeSubnets.size);
+        const remainder = remainingBudget % activeSubnets.size;
         
-        if (mask >= 24) {
-            return [cidr];
+        if (share === 0) {
+            let rem = remainingBudget;
+            for (const s of activeSubnets) {
+                if (rem === 0) break;
+                const currentAlloc = allocations.get(s);
+                if (currentAlloc < s.capacity) {
+                    allocations.set(s, currentAlloc + 1);
+                    rem--;
+                    if (currentAlloc + 1 === s.capacity) {
+                        activeSubnets.delete(s);
+                    }
+                } else {
+                    activeSubnets.delete(s);
+                }
+            }
+            remainingBudget = rem;
+            break;
         }
         
-        const parsedIp = ipaddr.parse(ip);
-        if (parsedIp.kind() !== 'ipv4') return [];
-        const octets = parsedIp.octets;
-        const ipNum = ((octets[0] << 24) >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3];
+        let newSurplus = 0;
+        let saturatedThisRound = [];
         
-        const hostBits = 32 - mask;
-        const totalHosts = Math.pow(2, hostBits);
-        const maxHostVal = totalHosts - 1;
-        const baseSubnet = (ipNum & (~maxHostVal)) >>> 0;
-        
-        const subnets = [];
-        const numSubnets24 = Math.pow(2, 24 - mask);
-        for (let i = 0; i < numSubnets24; i++) {
-            const subnetIpNum = (baseSubnet + (i * 256)) >>> 0;
-            const octet0 = (subnetIpNum >>> 24) & 0xFF;
-            const octet1 = (subnetIpNum >>> 16) & 0xFF;
-            const octet2 = (subnetIpNum >>> 8) & 0xFF;
-            subnets.push(`${octet0}.${octet1}.${octet2}.0/24`);
+        for (const s of activeSubnets) {
+            const currentAlloc = allocations.get(s);
+            const targetAlloc = currentAlloc + share;
+            
+            if (targetAlloc >= s.capacity) {
+                allocations.set(s, s.capacity);
+                newSurplus += (targetAlloc - s.capacity);
+                saturatedThisRound.push(s);
+            } else {
+                allocations.set(s, targetAlloc);
+            }
         }
-        return subnets;
-    } catch (e) {
-        console.error("Split to /24 error:", e);
-        return [];
+        
+        saturatedThisRound.forEach(s => activeSubnets.delete(s));
+        remainingBudget = newSurplus + remainder;
+        
+        if (activeSubnets.size === 0) {
+            break;
+        }
+    }
+    return allocations;
+}
+
+// Global scanner state extensions
+let scanStartTime = 0;
+let totalPingsExpected = 0;
+let completedPingsCount = 0;
+let topCandidates = [];
+let parsedSubnets = [];
+
+// Helper to format remaining time in mm:ss
+function formatTime(ms) {
+    if (ms <= 0 || isNaN(ms)) return "00:00";
+    const totalSecs = Math.floor(ms / 1000);
+    const mins = Math.floor(totalSecs / 60);
+    const secs = totalSecs % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
+
+// Latency score: 1.0 for <=20ms, decreasing linearly to 0 at timeout
+function getLatencyScore(avgLatency, timeout) {
+    if (!avgLatency || avgLatency >= timeout) return 0;
+    const minL = 20;
+    if (avgLatency <= minL) return 1.0;
+    return Math.max(0, 1 - (avgLatency - minL) / (timeout - minL));
+}
+
+// Jitter score: 1.0 for 0ms jitter, decreasing linearly to 0 at 100ms
+function getJitterScore(jitter) {
+    if (jitter === undefined || isNaN(jitter)) return 0;
+    return Math.max(0, 1 - jitter / 100);
+}
+
+// Render real-time subnets performance table
+function renderSubnetsTable() {
+    const tbody = document.getElementById('subnetsTableBody');
+    if (!tbody) return;
+    
+    let html = '';
+    parsedSubnets.forEach(s => {
+        const totalBudget = s.discoveryBudget + s.validationBudget;
+        const progressPercent = totalBudget > 0 ? Math.round((s.completedCount / totalBudget) * 100) : 0;
+        const avgLatStr = s.avgLatency ? `${s.avgLatency} ms` : '--';
+        
+        let scoreClass = 'quality-low';
+        if (s.qualityScore >= 70) scoreClass = 'quality-high';
+        else if (s.qualityScore >= 40) scoreClass = 'quality-medium';
+        
+        html += `
+            <tr>
+                <td style="font-family: monospace; font-weight: 600;">${s.cidr}</td>
+                <td style="font-family: monospace;">${s.capacity.toLocaleString()}</td>
+                <td style="font-family: monospace;">${s.discoveryBudget}</td>
+                <td style="font-family: monospace;">${s.validationBudget}</td>
+                <td>
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <div class="progress-bar-container" style="margin-bottom: 0; width: 60px; height: 6px;">
+                            <div class="progress-bar-fill" style="width: ${progressPercent}%;"></div>
+                        </div>
+                        <span style="font-family: monospace; font-size: 0.75rem;">${s.completedCount}/${totalBudget}</span>
+                    </div>
+                </td>
+                <td style="font-family: monospace; font-weight: 600; color: var(--success);">${s.healthyCount}</td>
+                <td><span class="quality-badge ${scoreClass}">${Math.round(s.qualityScore)}</span></td>
+            </tr>
+        `;
+    });
+    tbody.innerHTML = html;
+}
+
+// Render top 10 candidates dashboard table
+function renderTopCandidatesTable() {
+    const tbody = document.getElementById('topCandidatesTableBody');
+    if (!tbody) return;
+    
+    if (topCandidates.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--text-secondary); padding: 1rem;">No candidates discovered yet.</td></tr>`;
+        return;
+    }
+    
+    let html = '';
+    topCandidates.slice(0, 10).forEach(item => {
+        let scoreClass = 'quality-low';
+        if (item.score >= 70) scoreClass = 'quality-high';
+        else if (item.score >= 40) scoreClass = 'quality-medium';
+        
+        html += `
+            <tr>
+                <td style="font-family: monospace; font-weight: 600;">${item.ip}</td>
+                <td><span class="slider-val" style="background: var(--bg-tertiary); color: var(--text-primary); border-radius: 4px; padding: 0.1rem 0.3rem;">${item.port}</span></td>
+                <td style="font-family: monospace;">${item.latency} ms</td>
+                <td style="font-family: monospace;">${Math.round(item.stability * 100)}%</td>
+                <td style="font-family: monospace;">${Math.round(item.jitter)} ms</td>
+                <td><span class="quality-badge ${scoreClass}">${Math.round(item.score)}</span></td>
+                <td style="font-family: monospace; font-size: 0.75rem; color: var(--text-secondary);">${item.subnetCidr}</td>
+            </tr>
+        `;
+    });
+    tbody.innerHTML = html;
+}
+
+// Update phase indicators, progress bar, action, and remaining time
+function updateScanStatus(currentAction, activePhase = null, phaseProgress = 0, phaseCountStr = "") {
+    const actionEl = document.getElementById('statCurrentAction');
+    if (actionEl) {
+        actionEl.textContent = currentAction;
+    }
+    
+    if (completedPingsCount > 0 && scanActive) {
+        const elapsed = Date.now() - scanStartTime;
+        const msPerPing = elapsed / completedPingsCount;
+        const remainingPings = Math.max(0, totalPingsExpected - completedPingsCount);
+        const estMs = remainingPings * msPerPing;
+        const timeEl = document.getElementById('statRemainingTime');
+        if (timeEl) {
+            timeEl.textContent = formatTime(estMs);
+        }
+    }
+    
+    if (activePhase) {
+        const phases = ['discovery', 'validation', 'deep'];
+        phases.forEach(p => {
+            const card = document.getElementById(`phaseCard_${p}`);
+            const badge = document.getElementById(`phaseBadge_${p}`);
+            const fill = document.getElementById(`phaseProgressFill_${p}`);
+            const count = document.getElementById(`phaseCount_${p}`);
+            const percent = document.getElementById(`phasePercent_${p}`);
+            
+            if (!card || !badge || !fill) return;
+            
+            if (p === activePhase) {
+                card.classList.add('active');
+                card.classList.remove('completed');
+                badge.className = 'phase-badge badge-active';
+                badge.textContent = 'Active';
+                fill.style.width = `${phaseProgress}%`;
+                if (count) count.textContent = phaseCountStr;
+                if (percent) percent.textContent = `${Math.round(phaseProgress)}%`;
+            } else if (phases.indexOf(p) < phases.indexOf(activePhase)) {
+                card.classList.remove('active');
+                card.classList.add('completed');
+                badge.className = 'phase-badge badge-completed';
+                badge.textContent = 'Done';
+                fill.style.width = '100%';
+                if (percent) percent.textContent = '100%';
+            } else {
+                card.classList.remove('active', 'completed');
+                badge.className = 'phase-badge badge-pending';
+                badge.textContent = 'Pending';
+                fill.style.width = '0%';
+                if (percent) percent.textContent = '0%';
+            }
+        });
     }
 }
 
+// Compute subnet Quality Score
+function recalculateSubnetScore(subnet, timeout) {
+    if (subnet.attempts === 0) {
+        subnet.qualityScore = 0;
+        return;
+    }
+    
+    const successes = subnet.successes;
+    const attempts = subnet.attempts;
+    const successRate = successes / attempts;
+    
+    if (successes === 0) {
+        subnet.avgLatency = null;
+        subnet.qualityScore = 0;
+        return;
+    }
+    
+    const avgLatency = subnet.latencies.reduce((a, b) => a + b, 0) / successes;
+    subnet.avgLatency = Math.round(avgLatency);
+    
+    let totalStability = 0;
+    let totalJitter = 0;
+    let responsiveCount = 0;
+    
+    subnet.responsiveCandidates.forEach(cand => {
+        totalStability += cand.stability;
+        totalJitter += cand.jitter;
+        responsiveCount++;
+    });
+    
+    const latencyScore = getLatencyScore(avgLatency, timeout);
+    if (responsiveCount === 0) {
+        // Fallback score if no validation candidates tested yet
+        subnet.qualityScore = successRate * (0.5 * latencyScore + 0.5) * 100;
+        return;
+    }
+    
+    const avgStability = totalStability / responsiveCount;
+    const avgJitter = totalJitter / responsiveCount;
+    const jitterScore = getJitterScore(avgJitter);
+    
+    subnet.qualityScore = successRate * (
+        0.5 * latencyScore + 
+        0.3 * avgStability + 
+        0.2 * jitterScore
+    ) * 100;
+}
+
+// Compute single candidate score
+function recalculateCandidateScore(ip, port, subnet, timeout) {
+    const key = `${ip}:${port}`;
+    const cand = subnet.responsiveCandidates.get(key);
+    if (!cand) return;
+    
+    const successRate = cand.successes / cand.attempts;
+    const avgLatency = cand.latencies.reduce((a, b) => a + b, 0) / cand.successes;
+    const latencyScore = getLatencyScore(avgLatency, timeout);
+    const jitterScore = getJitterScore(cand.jitter);
+    
+    const score = successRate * (
+        0.5 * latencyScore + 
+        0.3 * cand.stability + 
+        0.2 * jitterScore
+    ) * 100;
+    
+    cand.score = score;
+    
+    const existingIndex = topCandidates.findIndex(item => item.ip === ip && item.port === port);
+    const candidateData = {
+        ip: ip,
+        port: port,
+        latency: Math.round(avgLatency),
+        stability: cand.stability,
+        jitter: cand.jitter,
+        score: score,
+        subnetCidr: subnet.cidr
+    };
+    
+    if (existingIndex > -1) {
+        topCandidates[existingIndex] = candidateData;
+    } else {
+        topCandidates.push(candidateData);
+    }
+    
+    topCandidates.sort((a, b) => b.score - a.score);
+}
+
+// Redesigned main scanning algorithm
 async function startScanning() {
     if (scanActive) return;
     
     scanResults = [];
     activeControllers = [];
+    topCandidates = [];
+    parsedSubnets = [];
+    completedPingsCount = 0;
+    
     document.getElementById('scanResultsTableBody').innerHTML = '';
     document.getElementById('scanResultsSection').style.display = 'none';
     
@@ -293,312 +609,395 @@ async function startScanning() {
         showWarning("Please select at least one port to scan.");
         return;
     }
-
+    
+    // Parse CIDR ranges
+    ranges.forEach(r => {
+        const parsed = parseCIDRBlock(r);
+        if (parsed) {
+            parsedSubnets.push({
+                ...parsed,
+                discoveryBudget: 0,
+                validationBudget: 0,
+                completedCount: 0,
+                healthyCount: 0,
+                avgLatency: null,
+                qualityScore: 0,
+                latencies: [],
+                successes: 0,
+                attempts: 0,
+                sampledOffsets: new Set(),
+                responsiveCandidates: new Map()
+            });
+        }
+    });
+    
+    if (parsedSubnets.length === 0) {
+        showWarning("No valid IP subnets could be parsed. Check your CIDR configurations.");
+        return;
+    }
+    
     scanActive = true;
     document.getElementById('startScanBtn').disabled = true;
     document.getElementById('stopScanBtn').disabled = false;
     document.getElementById('progressPanel').style.display = 'block';
     
-    document.getElementById('statTotal').textContent = sampleSize;
-    document.getElementById('statScanned').textContent = '0';
-    document.getElementById('statHealthy').textContent = '0';
-    document.getElementById('progressBarFill').style.width = '0%';
-    document.getElementById('progressStatusText').textContent = 'Scanning: Discovery Phase...';
-
-    // 1. Allocate budgets dynamically across selected ranges
-    const rangeBudgets = new Array(ranges.length).fill(Math.floor(sampleSize / ranges.length));
-    let remainder = sampleSize % ranges.length;
-    for (let i = 0; i < remainder; i++) {
-        rangeBudgets[i]++;
+    renderSubnetsTable();
+    renderTopCandidatesTable();
+    
+    scanStartTime = Date.now();
+    
+    // 1. Allocate Discovery Budgets (30% of total budget)
+    let discoveryBudgetTotal = Math.max(parsedSubnets.length * 2, Math.round(sampleSize * 0.3));
+    const totalCapacity = parsedSubnets.reduce((sum, s) => sum + s.capacity, 0);
+    discoveryBudgetTotal = Math.min(discoveryBudgetTotal, totalCapacity);
+    
+    const discoveryAllocations = distributeBudget(parsedSubnets, discoveryBudgetTotal);
+    parsedSubnets.forEach(s => {
+        s.discoveryBudget = discoveryAllocations.get(s) || 0;
+    });
+    
+    // Calculate total validation budget
+    let validationBudgetTotal = Math.max(0, sampleSize - discoveryBudgetTotal);
+    if (discoveryBudgetTotal + validationBudgetTotal > totalCapacity) {
+        validationBudgetTotal = totalCapacity - discoveryBudgetTotal;
     }
-
-    const scoutBudgets = [];
-    const focusBudgets = [];
-    for (let i = 0; i < ranges.length; i++) {
-        const b = rangeBudgets[i];
-        const s = Math.max(1, Math.min(b - 1, Math.floor(b * 0.25)));
-        scoutBudgets.push(s);
-        focusBudgets.push(b - s);
-    }
-
-    const scoutCandidates = [];
-    const uniqueKeys = new Set();
-    const rangeSubnets = {}; // Cache subnets for Phase 2
-
-    // 2. Generate Scout Candidates
-    for (let i = 0; i < ranges.length; i++) {
-        const range = ranges[i];
-        const budget = scoutBudgets[i];
-        const subnets = getSubnets24(range);
-        rangeSubnets[range] = subnets; // Cache it
-        
-        if (subnets.length === 0) continue;
-        shuffleArray(subnets);
-
-        let attempts = 0;
-        const maxAttempts = budget * 20;
-        let generated = 0;
-
-        while (generated < budget && attempts < maxAttempts) {
-            attempts++;
-            const sub = subnets[generated % subnets.length];
-            const ip = sampleIpFromCidr(sub);
-            if (ip) {
-                const port = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
-                const key = `${ip}:${port}`;
-                if (!uniqueKeys.has(key)) {
-                    uniqueKeys.add(key);
-                    scoutCandidates.push({ ip, port, range, subnet: sub });
-                    generated++;
-                }
-            }
-        }
-    }
-
-    if (scoutCandidates.length === 0) {
-        showWarning("No candidates could be generated. Please check your ranges.");
-        finalizeScan();
-        return;
-    }
-
-    // Shuffle scout candidates so requests to different ranges are interleaved
-    shuffleArray(scoutCandidates);
-
-    // Calculate total Focus budget that will be generated
-    let totalFocusBudget = 0;
-    for (let i = 0; i < ranges.length; i++) {
-        const range = ranges[i];
-        if (rangeSubnets[range] && rangeSubnets[range].length > 0) {
-            totalFocusBudget += focusBudgets[i];
-        }
-    }
-
-    let totalEstimatedCandidates = scoutCandidates.length + totalFocusBudget;
-    document.getElementById('statTotal').textContent = totalEstimatedCandidates;
-    document.getElementById('progressStatusText').textContent = 'Scanning: Scouting Phase...';
-
+    
+    totalPingsExpected = discoveryBudgetTotal + (validationBudgetTotal * testCount);
+    document.getElementById('statTotal').textContent = discoveryBudgetTotal + validationBudgetTotal;
+    
+    renderSubnetsTable();
+    
+    // ==========================================
+    // PHASE 1: DISCOVERY
+    // ==========================================
     if (logDiv) {
-        logDiv.innerHTML += `<div>[System] Phase 1: Scouting ${scoutCandidates.length} candidates across ${ranges.length} ranges...</div>`;
+        logDiv.innerHTML += `<div>[System] Phase 1: Discovery Phase started (${discoveryBudgetTotal} samples)...</div>`;
         logDiv.scrollTop = logDiv.scrollHeight;
     }
-
-    const activeSubnetsPerRange = {};
-    ranges.forEach(r => {
-        activeSubnetsPerRange[r] = new Set();
+    
+    const discoveryCandidates = [];
+    parsedSubnets.forEach(s => {
+        if (s.discoveryBudget > 0) {
+            const offsets = sampleOffsets(s.capacity, s.discoveryBudget);
+            offsets.forEach(offset => {
+                s.sampledOffsets.add(offset);
+                const ip = getIpFromOffset(s.startNum, offset);
+                const port = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
+                discoveryCandidates.push({ ip, port, subnet: s, offset });
+            });
+        }
     });
-
-    let index = 0;
-    let scannedCount = 0;
-    let healthyCount = 0;
-    let currentPhaseCandidates = [];
-
-    async function runWorker(testCountForPhase) {
-        while (index < currentPhaseCandidates.length && scanActive) {
-            const current = currentPhaseCandidates[index++];
-            if (!current) break;
-            
-            try {
-                let latencies = [];
-                let isHealthy = true;
-                let filteredReason = ''; // 'fake' or 'timeout'
-                
-                for (let t = 0; t < testCountForPhase; t++) {
-                    if (!scanActive) {
-                        isHealthy = false;
-                        break;
-                    }
-                    
-                    const latency = await testIpConnection(current.ip, current.port, timeout);
-                    if (latency === null) {
-                        isHealthy = false;
-                        filteredReason = 'timeout';
-                        break;
-                    }
-                    if (latency < minLatency) {
-                        isHealthy = false;
-                        filteredReason = 'fake';
-                        latencies.push(latency);
-                        break;
-                    }
-                    latencies.push(latency);
-                }
-                
-                scannedCount++;
-                
-                if (isHealthy && latencies.length === testCountForPhase) {
-                    const avgLatency = Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length);
-                    healthyCount++;
-                    
-                    scanResults.push({ ip: current.ip, port: current.port, latency: avgLatency });
-                    scanResults.sort((a, b) => a.latency - b.latency);
-                    renderResultsTable();
-                    
-                    if (current.subnet) {
-                        activeSubnetsPerRange[current.range].add(current.subnet);
-                    }
-                    
-                    if (logDiv) {
-                        const pingsStr = latencies.join('ms, ') + 'ms';
-                        logDiv.innerHTML += `<div style="color: var(--success);">[✓] Responsive: ${current.ip}:${current.port} (Avg: ${avgLatency}ms, Pings: [${pingsStr}]) [Range: ${current.range}]</div>`;
-                        logDiv.scrollTop = logDiv.scrollHeight;
-                    }
-                } else {
-                    if (logDiv) {
-                        if (filteredReason === 'fake') {
-                            const badLat = latencies[latencies.length - 1];
-                            logDiv.innerHTML += `<div style="color: var(--text-muted); opacity: 0.7;">[x] Filtered: ${current.ip}:${current.port} (${badLat}ms) - potential fake reset [Range: ${current.range}]</div>`;
-                        } else {
-                            // Offline/Timeout, skip logging to avoid cluttering
-                        }
-                        logDiv.scrollTop = logDiv.scrollHeight;
-                    }
-                }
-                
-                document.getElementById('statScanned').textContent = scannedCount;
-                document.getElementById('statHealthy').textContent = healthyCount;
-                const percent = Math.round((scannedCount / totalEstimatedCandidates) * 100);
-                document.getElementById('progressBarFill').style.width = `${Math.min(100, percent)}%`;
-            } catch (e) {
-                console.error(e);
-            }
+    
+    shuffleArray(discoveryCandidates);
+    
+    let currentIndex = 0;
+    let uiUpdateTimeout = 0;
+    
+    function triggerUIUpdate() {
+        if (Date.now() - uiUpdateTimeout > 100) {
+            renderSubnetsTable();
+            renderTopCandidatesTable();
+            uiUpdateTimeout = Date.now();
         }
     }
-
-    async function executePhase(candidatesList, testCountForPhase) {
-        currentPhaseCandidates = candidatesList;
-        index = 0;
+    
+    async function runDiscoveryWorker() {
+        while (currentIndex < discoveryCandidates.length && scanActive) {
+            const current = discoveryCandidates[currentIndex++];
+            if (!current) break;
+            
+            const subnet = current.subnet;
+            const latency = await testIpConnection(current.ip, current.port, timeout, minLatency);
+            
+            completedPingsCount++;
+            subnet.attempts++;
+            subnet.completedCount++;
+            
+            const scannedCount = parsedSubnets.reduce((sum, s) => sum + s.completedCount, 0);
+            const healthyCount = parsedSubnets.reduce((sum, s) => sum + s.healthyCount, 0);
+            
+            document.getElementById('statScanned').textContent = scannedCount;
+            document.getElementById('statHealthy').textContent = healthyCount;
+            
+            const phaseProgress = (scannedCount / discoveryBudgetTotal) * 100;
+            updateScanStatus(
+                `Scouting ${current.ip}:${current.port}`, 
+                'discovery', 
+                phaseProgress, 
+                `${scannedCount}/${discoveryBudgetTotal}`
+            );
+            
+            if (latency !== null) {
+                subnet.successes++;
+                subnet.latencies.push(latency);
+                subnet.healthyCount++;
+                
+                subnet.responsiveCandidates.set(`${current.ip}:${current.port}`, {
+                    ip: current.ip,
+                    port: current.port,
+                    latencies: [latency],
+                    successes: 1,
+                    attempts: 1,
+                    stability: 1.0,
+                    jitter: 0,
+                    score: 0
+                });
+                
+                recalculateCandidateScore(current.ip, current.port, subnet, timeout);
+                
+                if (logDiv) {
+                    logDiv.innerHTML += `<div style="color: var(--success);">[✓] Scouting Responsive: ${current.ip}:${current.port} (${latency}ms)</div>`;
+                    logDiv.scrollTop = logDiv.scrollHeight;
+                }
+            }
+            
+            recalculateSubnetScore(subnet, timeout);
+            triggerUIUpdate();
+        }
+    }
+    
+    if (discoveryCandidates.length > 0 && scanActive) {
+        const actualThreads = Math.min(threadCount, discoveryCandidates.length);
         const workers = [];
-        const actualThreads = Math.min(threadCount, candidatesList.length);
-        
         for (let i = 0; i < actualThreads; i++) {
             workers.push((async () => {
-                await new Promise(r => setTimeout(r, i * 30)); // 30ms stagger
-                await runWorker(testCountForPhase);
+                await new Promise(r => setTimeout(r, i * 20));
+                await runDiscoveryWorker();
             })());
         }
         await Promise.all(workers);
     }
-
-    // Execute Scouting Phase (1 ping per candidate)
-    await executePhase(scoutCandidates, 1);
+    
+    parsedSubnets.forEach(s => recalculateSubnetScore(s, timeout));
+    renderSubnetsTable();
+    renderTopCandidatesTable();
     
     if (!scanActive) {
         finalizeScan();
         return;
     }
-
-    // Generate Focus Candidates
-    const focusCandidates = [];
-    const activeRanges = ranges.filter(r => activeSubnetsPerRange[r] && activeSubnetsPerRange[r].size > 0);
-
-    if (activeRanges.length > 0) {
-        // Distribute remaining budget evenly among active ranges
-        const activeRangeBudgets = new Array(activeRanges.length).fill(Math.floor(totalFocusBudget / activeRanges.length));
-        let remainder = totalFocusBudget % activeRanges.length;
-        for (let i = 0; i < remainder; i++) {
-            activeRangeBudgets[i]++;
+    
+    // ==========================================
+    // PHASE 2: VALIDATION & ADAPTIVE ALLOCATION
+    // ==========================================
+    if (logDiv) {
+        logDiv.innerHTML += `<div>[System] Phase 2: Adaptive Validation started...</div>`;
+        logDiv.scrollTop = logDiv.scrollHeight;
+    }
+    
+    const explorationBudget = Math.round(validationBudgetTotal * 0.15);
+    const proportionalBudget = validationBudgetTotal - explorationBudget;
+    
+    const totalScore = parsedSubnets.reduce((sum, s) => sum + s.qualityScore, 0);
+    const proportionalAllocations = new Map();
+    
+    parsedSubnets.forEach(s => {
+        let share = 0;
+        if (totalScore > 0) {
+            share = Math.floor(proportionalBudget * (s.qualityScore / totalScore));
+        } else {
+            share = Math.floor(proportionalBudget / parsedSubnets.length);
         }
-
-        for (let i = 0; i < activeRanges.length; i++) {
-            const range = activeRanges[i];
-            const budget = activeRangeBudgets[i];
-            const activeSubs = Array.from(activeSubnetsPerRange[range]);
-            // Shuffle active subnets to maximize diversity
-            shuffleArray(activeSubs);
-
-            let attempts = 0;
-            const maxAttempts = budget * 20;
+        proportionalAllocations.set(s, share);
+    });
+    
+    const explorationAllocations = new Map();
+    parsedSubnets.forEach(s => {
+        const share = Math.floor(explorationBudget / parsedSubnets.length);
+        explorationAllocations.set(s, share);
+    });
+    
+    const combinedBudgets = parsedSubnets.map(s => {
+        const propShare = proportionalAllocations.get(s) || 0;
+        const explShare = explorationAllocations.get(s) || 0;
+        return {
+            subnet: s,
+            targetBudget: propShare + explShare
+        };
+    });
+    
+    const validationAllocations = distributeBudget(
+        parsedSubnets, 
+        combinedBudgets.reduce((sum, item) => sum + item.targetBudget, 0)
+    );
+    
+    parsedSubnets.forEach(s => {
+        s.validationBudget = validationAllocations.get(s) || 0;
+    });
+    
+    const actualValidationBudget = parsedSubnets.reduce((sum, s) => sum + s.validationBudget, 0);
+    totalPingsExpected = completedPingsCount + (actualValidationBudget * testCount);
+    
+    renderSubnetsTable();
+    
+    const validationCandidates = [];
+    parsedSubnets.forEach(s => {
+        if (s.validationBudget > 0) {
             let generated = 0;
-
-            while (generated < budget && attempts < maxAttempts) {
+            let attempts = 0;
+            const maxAttempts = s.validationBudget * 50;
+            
+            while (generated < s.validationBudget && attempts < maxAttempts) {
                 attempts++;
-                const sub = activeSubs[generated % activeSubs.length];
-                const ip = sampleIpFromCidr(sub);
-                if (ip) {
+                const randVal = Math.floor(Math.random() * s.capacity);
+                if (!s.sampledOffsets.has(randVal)) {
+                    s.sampledOffsets.add(randVal);
+                    const ip = getIpFromOffset(s.startNum, randVal);
                     const port = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
-                    const key = `${ip}:${port}`;
-                    if (!uniqueKeys.has(key)) {
-                        uniqueKeys.add(key);
-                        focusCandidates.push({ ip, port, range, subnet: sub });
-                        generated++;
-                    }
+                    validationCandidates.push({ ip, port, subnet: s, offset: randVal });
+                    generated++;
+                }
+            }
+            
+            if (generated < s.validationBudget) {
+                const remainingAlloc = s.validationBudget - generated;
+                for (let i = 0; i < remainingAlloc; i++) {
+                    const randVal = Math.floor(Math.random() * s.capacity);
+                    const ip = getIpFromOffset(s.startNum, randVal);
+                    const port = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
+                    validationCandidates.push({ ip, port, subnet: s, offset: randVal });
                 }
             }
         }
-    } else {
-        // Fallback: no active subnets found anywhere!
-        // To prevent long hanging, let's cap the fallback budget to a reasonable small number (e.g. max 200 IPs total)
-        // because if everything is blocked, scanning thousands of IPs is useless.
-        const fallbackBudgetTotal = Math.min(200, totalFocusBudget);
-        if (fallbackBudgetTotal > 0) {
-            if (logDiv) {
-                logDiv.innerHTML += `<div style="color: var(--warning); font-size: 0.75rem;">[System] No active subnets found in Phase 1. Running a limited fallback scan of ${fallbackBudgetTotal} random IPs...</div>`;
-                logDiv.scrollTop = logDiv.scrollHeight;
-            }
-
-            const fallbackRangeBudgets = new Array(ranges.length).fill(Math.floor(fallbackBudgetTotal / ranges.length));
-            let remainder = fallbackBudgetTotal % ranges.length;
-            for (let i = 0; i < remainder; i++) {
-                fallbackRangeBudgets[i]++;
-            }
-
-            for (let i = 0; i < ranges.length; i++) {
-                const range = ranges[i];
-                const budget = fallbackRangeBudgets[i];
-                const subnets = rangeSubnets[range];
-                if (!subnets || subnets.length === 0) continue;
+    });
+    
+    shuffleArray(validationCandidates);
+    
+    let valIndex = 0;
+    let valScannedCount = 0;
+    
+    async function runValidationWorker() {
+        while (valIndex < validationCandidates.length && scanActive) {
+            const current = validationCandidates[valIndex++];
+            if (!current) break;
+            
+            const subnet = current.subnet;
+            const latencies = [];
+            let successes = 0;
+            
+            for (let t = 0; t < testCount; t++) {
+                if (!scanActive) break;
                 
-                shuffleArray(subnets);
-
-                let attempts = 0;
-                const maxAttempts = budget * 20;
-                let generated = 0;
-
-                while (generated < budget && attempts < maxAttempts) {
-                    attempts++;
-                    const sub = subnets[generated % subnets.length];
-                    const ip = sampleIpFromCidr(sub);
-                    if (ip) {
-                        const port = selectedPorts[Math.floor(Math.random() * selectedPorts.length)];
-                        const key = `${ip}:${port}`;
-                        if (!uniqueKeys.has(key)) {
-                            uniqueKeys.add(key);
-                            focusCandidates.push({ ip, port, range, subnet: sub });
-                            generated++;
-                        }
+                const latency = await testIpConnection(current.ip, current.port, timeout, minLatency);
+                completedPingsCount++;
+                
+                if (latency !== null) {
+                    successes++;
+                    latencies.push(latency);
+                    subnet.latencies.push(latency);
+                }
+                
+                triggerUIUpdate();
+            }
+            
+            valScannedCount++;
+            subnet.attempts += testCount;
+            subnet.completedCount += subnet.validationBudget > 0 ? 1 : 0; // Prevent overflow beyond budget
+            
+            const globalScanned = discoveryBudgetTotal + valScannedCount;
+            const healthyCount = parsedSubnets.reduce((sum, s) => sum + s.healthyCount, 0);
+            
+            document.getElementById('statScanned').textContent = globalScanned;
+            document.getElementById('statHealthy').textContent = healthyCount;
+            
+            const phaseProgress = (valScannedCount / actualValidationBudget) * 100;
+            updateScanStatus(
+                `Verifying ${current.ip}:${current.port}`, 
+                'validation', 
+                phaseProgress, 
+                `${valScannedCount}/${actualValidationBudget}`
+            );
+            
+            if (successes > 0) {
+                subnet.healthyCount++;
+                
+                const avg = Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length);
+                let jitter = 0;
+                if (latencies.length > 1) {
+                    let diffSum = 0;
+                    for (let i = 0; i < latencies.length - 1; i++) {
+                        diffSum += Math.abs(latencies[i+1] - latencies[i]);
                     }
+                    jitter = diffSum / (latencies.length - 1);
+                }
+                
+                let stdDev = 0;
+                if (latencies.length > 0) {
+                    const variance = latencies.reduce((sum, val) => sum + Math.pow(val - avg, 2), 0) / latencies.length;
+                    stdDev = Math.sqrt(variance);
+                }
+                const stability = avg > 0 ? 1 - Math.min(1, stdDev / avg) : 0;
+                
+                subnet.responsiveCandidates.set(`${current.ip}:${current.port}`, {
+                    ip: current.ip,
+                    port: current.port,
+                    latencies: latencies,
+                    successes: successes,
+                    attempts: testCount,
+                    stability: stability,
+                    jitter: jitter,
+                    score: 0
+                });
+                
+                recalculateCandidateScore(current.ip, current.port, subnet, timeout);
+                
+                if (logDiv) {
+                    const pingsStr = latencies.map(l => `${l}ms`).join(', ');
+                    logDiv.innerHTML += `<div style="color: var(--success);">[✓] Responsive candidate: ${current.ip}:${current.port} (RTT: ${avg}ms, Jitter: ${Math.round(jitter)}ms, Stability: ${Math.round(stability * 100)}%)</div>`;
+                    logDiv.scrollTop = logDiv.scrollHeight;
                 }
             }
+            
+            recalculateSubnetScore(subnet, timeout);
+            triggerUIUpdate();
         }
     }
-
-    if (focusCandidates.length > 0 && scanActive) {
-        totalEstimatedCandidates = scoutCandidates.length + focusCandidates.length;
-        document.getElementById('statTotal').textContent = totalEstimatedCandidates;
-        document.getElementById('progressStatusText').textContent = 'Scanning: Focused Phase...';
-        
-        if (logDiv) {
-            logDiv.innerHTML += `<div>[System] Phase 2: Testing ${focusCandidates.length} candidates in active subnets (Stability count: ${testCount})...</div>`;
-            logDiv.scrollTop = logDiv.scrollHeight;
+    
+    if (validationCandidates.length > 0 && scanActive) {
+        const actualThreads = Math.min(threadCount, validationCandidates.length);
+        const workers = [];
+        for (let i = 0; i < actualThreads; i++) {
+            workers.push((async () => {
+                await new Promise(r => setTimeout(r, i * 20));
+                await runValidationWorker();
+            })());
         }
-
-        // Execute Focused Phase (testCount pings per candidate)
-        await executePhase(focusCandidates, testCount);
+        await Promise.all(workers);
+    }
+    
+    // ==========================================
+    // PHASE 3: DEEP SCAN & FINAL RANKING
+    // ==========================================
+    if (scanActive) {
+        updateScanStatus('Ranking and finalizing candidates...', 'deep', 50, "Finalizing");
+        
+        parsedSubnets.forEach(s => {
+            recalculateSubnetScore(s, timeout);
+            for (const key of s.responsiveCandidates.keys()) {
+                recalculateCandidateScore(key.split(':')[0], parseInt(key.split(':')[1]), s, timeout);
+            }
+        });
+        
+        scanResults = [...topCandidates].sort((a, b) => b.score - a.score);
+        renderResultsTable();
+        
+        updateScanStatus('Scan completed successfully!', 'deep', 100, "Completed");
     }
     
     finalizeScan();
-
+    
     function finalizeScan() {
         scanActive = false;
         document.getElementById('startScanBtn').disabled = false;
         document.getElementById('stopScanBtn').disabled = true;
-        document.getElementById('progressStatusText').textContent = 'Scan completed!';
-        document.getElementById('progressBarFill').style.width = '100%';
+        document.getElementById('statRemainingTime').textContent = "00:00";
+        
+        const healthyCount = parsedSubnets.reduce((sum, s) => sum + s.healthyCount, 0);
         
         if (scanResults.length > 0) {
-            showSuccess(`Scan complete. Found ${scanResults.length} responsive IPs.`);
+            showSuccess(`Scan complete. Found ${scanResults.length} working configurations.`);
         } else {
-            showError("Scan completed, but no responsive IPs were found. Check your connection or increase timeout.");
+            showError("Scan completed, but no responsive IPs were found. Please check your connection parameters or increase the timeout.");
         }
     }
 }
@@ -614,11 +1013,12 @@ function stopScanning() {
     
     document.getElementById('startScanBtn').disabled = false;
     document.getElementById('stopScanBtn').disabled = true;
-    document.getElementById('progressStatusText').textContent = 'Scan stopped by user.';
+    
+    updateScanStatus('Scan stopped by user.', 'deep', 100, "Stopped");
     showWarning("Scan stopped. Results gathered so far are displayed below.");
 }
 
-function testIpConnection(ip, port, timeout) {
+function testIpConnection(ip, port, timeout, minLatency = 20) {
     return new Promise((resolve) => {
         if (!scanActive) {
             resolve(null);
@@ -646,7 +1046,11 @@ function testIpConnection(ip, port, timeout) {
             const duration = Math.round(performance.now() - startTime);
             clearTimeout(timeoutId);
             removeController(controller);
-            resolve(duration);
+            if (duration < minLatency) {
+                resolve(null);
+            } else {
+                resolve(duration);
+            }
         })
         .catch(err => {
             const duration = Math.round(performance.now() - startTime);
@@ -656,7 +1060,7 @@ function testIpConnection(ip, port, timeout) {
             if (err.name === 'AbortError') {
                 resolve(null);
             } else {
-                if (duration < timeout) {
+                if (duration >= minLatency && duration < timeout) {
                     resolve(duration);
                 } else {
                     resolve(null);

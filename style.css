@@ -1183,3 +1183,204 @@ tr:hover td {
         font-size: 0.85rem;
     }
 }
+
+/* Redesigned Scanner Dashboard Styles */
+.scanner-dashboard {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    margin-top: 1.5rem;
+}
+
+.phases-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+}
+
+@media (max-width: 768px) {
+    .phases-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.phase-card {
+    background: rgba(10, 14, 26, 0.4);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    transition: all 0.3s ease;
+}
+
+.phase-card.active {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 12px var(--accent-glow);
+    background: rgba(0, 210, 255, 0.03);
+}
+
+.phase-card.completed {
+    border-color: var(--success);
+    background: rgba(16, 185, 129, 0.02);
+}
+
+.phase-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.phase-title {
+    font-family: 'Outfit', sans-serif;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.phase-badge {
+    font-size: 0.7rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 20px;
+    font-weight: 600;
+}
+
+.badge-pending {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-muted);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.badge-active {
+    background: var(--accent-bg-glow);
+    color: var(--accent-color);
+    border: 1px solid var(--accent-color);
+    animation: pulse-glow 1.5s infinite alternate;
+}
+
+.badge-completed {
+    background: var(--success-glow);
+    color: var(--success);
+    border: 1px solid var(--success);
+}
+
+@keyframes pulse-glow {
+    0% {
+        box-shadow: 0 0 2px var(--accent-glow);
+    }
+    100% {
+        box-shadow: 0 0 8px var(--accent-color);
+    }
+}
+
+.meta-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+}
+
+@media (max-width: 992px) {
+    .meta-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+.meta-card {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 0.75rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.meta-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.meta-value {
+    font-family: 'Outfit', sans-serif;
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+/* Compact dashboard tables */
+.dashboard-section-title {
+    font-family: 'Outfit', sans-serif;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}
+
+.compact-table-container {
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.compact-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+    text-align: left;
+}
+
+.compact-table th {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-weight: 600;
+    padding: 0.5rem 0.75rem;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.compact-table td {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-primary);
+}
+
+.compact-table tr:last-child td {
+    border-bottom: none;
+}
+
+.compact-table tr:hover td {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.quality-badge {
+    font-weight: 700;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+}
+
+.quality-high {
+    background: var(--success-glow);
+    color: var(--success);
+}
+
+.quality-medium {
+    background: var(--warning-glow);
+    color: var(--warning);
+}
+
+.quality-low {
+    background: var(--danger-glow);
+    color: var(--danger);
+}
+

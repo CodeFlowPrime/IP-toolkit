@@ -321,7 +321,9 @@ function distributeBudget(subnets, totalBudget) {
         
         if (share === 0) {
             let rem = remainingBudget;
-            for (const s of activeSubnets) {
+            // Shuffle the active subnets list to distribute remainders randomly and fairly
+            const shuffledActive = shuffleArray(Array.from(activeSubnets));
+            for (const s of shuffledActive) {
                 if (rem === 0) break;
                 const currentAlloc = allocations.get(s);
                 if (currentAlloc < s.capacity) {
@@ -389,7 +391,9 @@ function distributeProportionalBudget(subnets, targetBudgets) {
         
         if (share === 0) {
             let rem = remainingBudget;
-            for (const s of activeSubnets) {
+            // Shuffle the active subnets list to distribute remainder randomly and fairly
+            const shuffledActive = shuffleArray(Array.from(activeSubnets));
+            for (const s of shuffledActive) {
                 if (rem === 0) break;
                 const currentAlloc = allocations.get(s);
                 if (currentAlloc < s.capacity) {
@@ -769,11 +773,12 @@ async function startScanning() {
     
     let targetCapacity = 1024; // Default target capacity
     if (totalCidrCapacity > 0 && sampleSize > 0) {
-        // Aim for about sampleSize * 1.5 subnets
-        const idealNumSubnets = sampleSize * 1.5;
-        const idealCapacity = totalCidrCapacity / idealNumSubnets;
+        // Aim for about targetNumSubnets to balance discovery and validation budget
+        const targetNumSubnets = Math.min(256, Math.max(16, Math.round(sampleSize * 0.15)));
+        const idealCapacity = totalCidrCapacity / targetNumSubnets;
         const powerOf2 = Math.round(Math.log2(idealCapacity));
-        targetCapacity = Math.pow(2, Math.max(8, Math.min(13, powerOf2))); // cap capacity between 256 (2^8) and 8192 (2^13)
+        // Cap target capacity between 256 (2^8) and 65536 (2^16)
+        targetCapacity = Math.pow(2, Math.max(8, Math.min(16, powerOf2)));
     }
     
     if (logDiv) {
@@ -818,7 +823,10 @@ async function startScanning() {
     scanStartTime = Date.now();
     
     // 1. Allocate Discovery Budgets (30% of total budget)
-    let discoveryBudgetTotal = Math.max(parsedSubnets.length * 2, Math.round(sampleSize * 0.3));
+    let discoveryBudgetTotal = Math.round(sampleSize * 0.3);
+    if (sampleSize > 0 && discoveryBudgetTotal === 0) {
+        discoveryBudgetTotal = 1;
+    }
     const totalCapacity = parsedSubnets.reduce((sum, s) => sum + s.capacity, 0);
     discoveryBudgetTotal = Math.min(discoveryBudgetTotal, totalCapacity);
     
@@ -977,36 +985,55 @@ async function startScanning() {
     
     const totalScore = parsedSubnets.reduce((sum, s) => sum + s.qualityScore, 0);
     const proportionalAllocations = new Map();
-    
-    parsedSubnets.forEach(s => {
-        let share = 0;
-        if (totalScore > 0) {
-            share = Math.floor(proportionalBudget * (s.qualityScore / totalScore));
-        } else {
-            share = Math.floor(proportionalBudget / parsedSubnets.length);
-        }
-        proportionalAllocations.set(s, share);
-    });
-    
     const explorationAllocations = new Map();
-    parsedSubnets.forEach(s => {
-        const share = Math.floor(explorationBudget / parsedSubnets.length);
-        explorationAllocations.set(s, share);
-    });
-    
-    const combinedBudgets = parsedSubnets.map(s => {
-        const propShare = proportionalAllocations.get(s) || 0;
-        const explShare = explorationAllocations.get(s) || 0;
-        return {
-            subnet: s,
-            targetBudget: propShare + explShare
-        };
-    });
-    
     const targetBudgetsMap = new Map();
-    combinedBudgets.forEach(item => {
-        targetBudgetsMap.set(item.subnet, item.targetBudget);
-    });
+    
+    if (totalScore > 0) {
+        let allocatedProp = 0;
+        parsedSubnets.forEach(s => {
+            const share = Math.floor(proportionalBudget * (s.qualityScore / totalScore));
+            proportionalAllocations.set(s, share);
+            allocatedProp += share;
+        });
+        // Distribute remainder of proportional budget to highest quality subnets
+        let propRemainder = proportionalBudget - allocatedProp;
+        if (propRemainder > 0) {
+            const sortedSubnets = [...parsedSubnets].sort((a, b) => b.qualityScore - a.qualityScore);
+            for (const s of sortedSubnets) {
+                if (propRemainder === 0) break;
+                proportionalAllocations.set(s, (proportionalAllocations.get(s) || 0) + 1);
+                propRemainder--;
+            }
+        }
+        
+        let allocatedExpl = 0;
+        parsedSubnets.forEach(s => {
+            const share = Math.floor(explorationBudget / parsedSubnets.length);
+            explorationAllocations.set(s, share);
+            allocatedExpl += share;
+        });
+        // Distribute remainder of exploration budget randomly
+        let explRemainder = explorationBudget - allocatedExpl;
+        if (explRemainder > 0) {
+            const shuffledSubnets = shuffleArray([...parsedSubnets]);
+            for (const s of shuffledSubnets) {
+                if (explRemainder === 0) break;
+                explorationAllocations.set(s, (explorationAllocations.get(s) || 0) + 1);
+                explRemainder--;
+            }
+        }
+        
+        parsedSubnets.forEach(s => {
+            const target = (proportionalAllocations.get(s) || 0) + (explorationAllocations.get(s) || 0);
+            targetBudgetsMap.set(s, target);
+        });
+    } else {
+        // If no subnets responded in Phase 1, distribute the entire validation budget fairly using distributeBudget
+        const equalAllocations = distributeBudget(parsedSubnets, validationBudgetTotal);
+        parsedSubnets.forEach(s => {
+            targetBudgetsMap.set(s, equalAllocations.get(s) || 0);
+        });
+    }
     
     const validationAllocations = distributeProportionalBudget(parsedSubnets, targetBudgetsMap);
     

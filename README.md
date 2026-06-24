@@ -1,16 +1,26 @@
-# CodeFlow IP Panel 🌌
+<h1 align="center">CodeFlow IP Panel 🌌</h1>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Telegram Channel](https://img.shields.io/badge/Telegram-Channel-blue?style=flat&logo=telegram)](https://t.me/CodeFlowDevs)
-[![Web App](https://img.shields.io/badge/Web%20App-Online-brightgreen?style=flat&logo=github)](https://codeflowprime.github.io/xray-toolkit/)
+<p align="center">
+  <a href="https://codeflowprime.github.io/IP-toolkit/">
+    <img src="https://img.shields.io/badge/Web_App-Online-8b5cf6?style=for-the-badge&logo=github&logoColor=white" alt="Web App">
+  </a>
+  <a href="https://t.me/CodeFlowDevs">
+    <img src="https://img.shields.io/badge/Telegram-Channel-229ed9?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram Channel">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-475569?style=for-the-badge" alt="License: MIT">
+  </a>
+</p>
 
-[فارسی (Persian)](README.fa.md)
+<p align="center">
+  <a href="README.fa.md"><b>فارسی (Persian)</b></a>
+</p>
 
 ---
 
 A premium, fully client-side, browser-based clean IP scanner and bulk configuration engine designed for Xray/V2Ray protocols. Beautifully crafted with a dark/light responsive cosmic space theme, modern typography, glassmorphism UI elements, and interactive particle backgrounds.
 
-> **Live Web App:** Run the scanner directly online at **[https://codeflowprime.github.io/xray-toolkit/](https://codeflowprime.github.io/xray-toolkit/)**
+> **Live Web App:** Run the scanner directly online at **[https://codeflowprime.github.io/IP-toolkit/](https://codeflowprime.github.io/IP-toolkit/)**
 
 > **100% Static & Client-Side:** No database, no backend server, and no server-side processing required. Perfect for hosting on GitHub Pages, Cloudflare Pages, Vercel, or running directly on your computer.
 
@@ -53,7 +63,7 @@ Modify or generate hundreds of V2Ray/Xray configs in bulk using clean IP address
 
 ### Option A: Run Online (No Installation Required)
 Simply open the online GitHub Pages web app:
-👉 **[https://codeflowprime.github.io/xray-toolkit/](https://codeflowprime.github.io/xray-toolkit/)**
+👉 **[https://codeflowprime.github.io/IP-toolkit/](https://codeflowprime.github.io/IP-toolkit/)**
 
 ### Option B: Direct Local Execution
 1. Download all files from this repository to your computer.

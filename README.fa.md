@@ -1,17 +1,27 @@
-# پنل آی‌پی کد‌فلو (CodeFlow IP Panel) 🌌
+<h1 align="center">پنل آی‌پی کد‌فلو (CodeFlow IP Panel) 🌌</h1>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Telegram Channel](https://img.shields.io/badge/Telegram-Channel-blue?style=flat&logo=telegram)](https://t.me/CodeFlowDevs)
-[![Web App](https://img.shields.io/badge/Web%20App-Online-brightgreen?style=flat&logo=github)](https://codeflowprime.github.io/xray-toolkit/)
+<p align="center">
+  <a href="https://codeflowprime.github.io/IP-toolkit/">
+    <img src="https://img.shields.io/badge/Web_App-Online-8b5cf6?style=for-the-badge&logo=github&logoColor=white" alt="Web App">
+  </a>
+  <a href="https://t.me/CodeFlowDevs">
+    <img src="https://img.shields.io/badge/Telegram-Channel-229ed9?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram Channel">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-475569?style=for-the-badge" alt="License: MIT">
+  </a>
+</p>
 
-[English (انگلیسی)](README.md)
+<p align="center">
+  <a href="README.md"><b>English (انگلیسی)</b></a>
+</p>
 
 ---
 
 یک ابزار پرمیوم، کاملاً سمت کلاینت (تحت مرورگر) جهت اسکن آی‌پی‌های تمیز و ویرایش گروهی کانفیگ‌های Xray/V2Ray. این پنل با طراحی کهکشانی پویا، تایپوگرافی مدرن، المان‌های شیشه‌ای (Glassmorphic) و حالت‌های تیره/روشن طراحی شده است.
 
 > **اجرای آنلاین ابزار:** می‌توانید بدون نیاز به نصب، مستقیماً از نسخه آنلاین روی گیت‌هاب پیجز استفاده کنید:  
-> 👉 **[https://codeflowprime.github.io/xray-toolkit/](https://codeflowprime.github.io/xray-toolkit/)**
+> 👉 **[https://codeflowprime.github.io/IP-toolkit/](https://codeflowprime.github.io/IP-toolkit/)**
 
 > **۱۰۰٪ استاتیک و بدون نیاز به سرور:** پروژه هیچ نیازی به دیتابیس یا سرور پس‌زمینه ندارد و اجرای آن کاملاً داخل مرورگر کاربر صورت می‌گیرد؛ از این رو بدون نیاز به هیچ پیش‌نیازی به صورت محلی و آفلاین قابل اجراست.
 
@@ -54,7 +64,7 @@
 
 ### روش اول: اجرای آنلاین (بدون نیاز به هیچ پیش‌نیازی)
 به سادگی آدرس وب‌اپلیکیشن گیت‌هاب پیجز را باز کنید:  
-👉 **[https://codeflowprime.github.io/xray-toolkit/](https://codeflowprime.github.io/xray-toolkit/)**
+👉 **[https://codeflowprime.github.io/IP-toolkit/](https://codeflowprime.github.io/IP-toolkit/)**
 
 ### روش دوم: اجرای مستقیم محلی
 1. تمامی فایل‌های پروژه را دانلود یا کلون کنید.

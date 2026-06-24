@@ -1140,6 +1140,7 @@ async function startScanning() {
             
             valScannedCount++;
             subnet.attempts += testCount;
+            subnet.successes += successes;
             subnet.completedCount += subnet.validationBudget > 0 ? 1 : 0;
             
             const globalScanned = discoveryBudgetTotal + valScannedCount;
